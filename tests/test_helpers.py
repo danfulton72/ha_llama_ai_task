@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import pytest
-from homeassistant.exceptions import HomeAssistantError
 import voluptuous as vol
+from homeassistant.exceptions import HomeAssistantError
 
-from custom_components.llama_cpp_ai_task.ai_task import (
+from custom_components.llama_cpp_ai_task.helpers import (
     _clean_schema,
+    _extract_text,
     _isolate_json,
     _to_json_schema,
+    strip_thinking,
 )
-from custom_components.llama_cpp_ai_task.entity import _extract_text, strip_thinking
 
 
 def test_strip_thinking() -> None:
