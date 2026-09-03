@@ -1,0 +1,44 @@
+name: Backfill HACS asset
+
+on:
+  push:
+    branches: [apply-reviewed-patch]
+    paths:
+      - ".github/workflows/backfill-hacs-asset.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Add constant-name assets to v1.0.0
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p dist
+          gh release download v1.0.0 \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern 'llama_cpp_ai_task-1.0.0.zip' \
+            --dir dist
+          cp dist/llama_cpp_ai_task-1.0.0.zip dist/llama_cpp_ai_task.zip
+          (cd dist && sha256sum llama_cpp_ai_task.zip > llama_cpp_ai_task.zip.sha256)
+          gh release upload v1.0.0 \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber \
+            dist/llama_cpp_ai_task.zip \
+            dist/llama_cpp_ai_task.zip.sha256
+
+      - name: Remove one-shot workflow
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/backfill-hacs-asset.yml
+          git commit -m "Remove HACS asset migration workflow"
+          git push origin HEAD:apply-reviewed-patch
