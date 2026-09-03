@@ -14,7 +14,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from . import LlamaCppConfigEntry
 from .const import AI_TASK_SUBENTRY_TYPE, CONF_ATTACHMENTS, LOGGER
 from .entity import LlamaCppBaseLLMEntity
-from .helpers import _isolate_json, _to_json_schema
+from .helpers import _isolate_json, _to_json_schema, attachments_supported
 
 
 async def async_setup_entry(
@@ -42,8 +42,10 @@ class LlamaCppTaskEntity(ai_task.AITaskEntity, LlamaCppBaseLLMEntity):
     def supported_features(self) -> ai_task.AITaskEntityFeature:
         """Return the features, which depend on how llama-server was started."""
         features = ai_task.AITaskEntityFeature.GENERATE_DATA
-        if self.subentry.data.get(
-            CONF_ATTACHMENTS, self.server_info.supports_vision
+        if attachments_supported(
+            forced=bool(self.subentry.data.get(CONF_ATTACHMENTS)),
+            vision=self.server_info.supports_vision,
+            audio=self.server_info.supports_audio,
         ):
             features |= ai_task.AITaskEntityFeature.SUPPORT_ATTACHMENTS
         return features
