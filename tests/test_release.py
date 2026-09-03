@@ -4,15 +4,27 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import sys
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-MODULE_PATH = ROOT / "scripts" / "release.py"
-SPEC = importlib.util.spec_from_file_location("release_helpers", MODULE_PATH)
-assert SPEC is not None and SPEC.loader is not None
-release = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(release)
+SCRIPTS = ROOT / "scripts"
+
+RELEASE_SPEC = importlib.util.spec_from_file_location(
+    "release", SCRIPTS / "release.py"
+)
+assert RELEASE_SPEC is not None and RELEASE_SPEC.loader is not None
+release = importlib.util.module_from_spec(RELEASE_SPEC)
+sys.modules["release"] = release
+RELEASE_SPEC.loader.exec_module(release)
+
+CONSISTENCY_SPEC = importlib.util.spec_from_file_location(
+    "release_consistency", SCRIPTS / "check_release_consistency.py"
+)
+assert CONSISTENCY_SPEC is not None and CONSISTENCY_SPEC.loader is not None
+release_consistency = importlib.util.module_from_spec(CONSISTENCY_SPEC)
+CONSISTENCY_SPEC.loader.exec_module(release_consistency)
 
 
 def test_normalize_version() -> None:
@@ -37,3 +49,31 @@ def test_tag_matches_manifest() -> None:
     mismatched = "v0.0.0" if current != "0.0.0" else "v999.999.999"
     with pytest.raises(ValueError):
         release.check_tag_matches_manifest(mismatched)
+
+
+def test_newest_published_release_includes_prereleases() -> None:
+    releases = [
+        {
+            "tag_name": "v1.0.0",
+            "draft": False,
+            "prerelease": False,
+            "published_at": "2026-09-01T10:00:00Z",
+        },
+        {
+            "tag_name": "v1.1.0-beta.1",
+            "draft": False,
+            "prerelease": True,
+            "published_at": "2026-09-02T10:00:00Z",
+        },
+        {
+            "tag_name": "v9.0.0",
+            "draft": True,
+            "prerelease": False,
+            "published_at": "2026-09-03T10:00:00Z",
+        },
+    ]
+    assert release_consistency._newest_published_tag(releases) == "v1.1.0-beta.1"
+
+
+def test_newest_published_release_handles_empty_list() -> None:
+    assert release_consistency._newest_published_tag([]) is None
