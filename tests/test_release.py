@@ -27,10 +27,13 @@ def test_normalize_version_rejects_invalid(value: str) -> None:
 
 
 def test_manifest_version_is_semver() -> None:
-    assert release.manifest_version() == "1.0.0"
+    current = release.manifest_version()
+    assert release.normalize_version(current) == current
 
 
 def test_tag_matches_manifest() -> None:
-    release.check_tag_matches_manifest("v1.0.0")
+    current = release.manifest_version()
+    release.check_tag_matches_manifest(f"v{current}")
+    mismatched = "v0.0.0" if current != "0.0.0" else "v999.999.999"
     with pytest.raises(ValueError):
-        release.check_tag_matches_manifest("v1.0.1")
+        release.check_tag_matches_manifest(mismatched)
