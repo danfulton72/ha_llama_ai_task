@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import base64
 from pathlib import Path
-import re
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.components import conversation
@@ -40,18 +39,10 @@ from .const import (
     LOGGER,
     MANUFACTURER,
 )
+from .helpers import _extract_text
 
 if TYPE_CHECKING:
     from . import LlamaCppConfigEntry
-
-# Some chat templates emit reasoning inside the content when the server runs
-# with `--reasoning-format none`. Strip it before parsing structured output.
-THINK_BLOCK = re.compile(
-    r"<(think|thinking|reasoning)>.*?</\1>", re.DOTALL | re.IGNORECASE
-)
-UNCLOSED_THINK_BLOCK = re.compile(
-    r"^.*?</(?:think|thinking|reasoning)>", re.DOTALL | re.IGNORECASE
-)
 
 
 class LlamaCppBaseLLMEntity(Entity):
@@ -265,45 +256,3 @@ class LlamaCppBaseLLMEntity(Entity):
             f"Unsupported attachment type `{mime_type}`; llama.cpp accepts "
             "images and audio"
         )
-
-
-def _extract_text(response: dict[str, Any]) -> str:
-    """Pull the assistant text out of a chat completion response."""
-    choices = response.get("choices")
-    if not isinstance(choices, list) or not choices:
-        raise HomeAssistantError("llama.cpp returned no choices")
-
-    choice = choices[0]
-    message = choice.get("message") if isinstance(choice, dict) else None
-    if not isinstance(message, dict):
-        raise HomeAssistantError("llama.cpp returned a malformed message")
-
-    text = message.get("content") or ""
-    if not isinstance(text, str):
-        # Some builds return typed content parts.
-        text = "".join(
-            part.get("text", "")
-            for part in text
-            if isinstance(part, dict) and part.get("type") == "text"
-        )
-
-    text = strip_thinking(text).strip()
-
-    if not text:
-        if choice.get("finish_reason") == "length":
-            raise HomeAssistantError(
-                "llama.cpp stopped at the token limit before producing an "
-                "answer; raise 'Maximum tokens' or disable thinking"
-            )
-        raise HomeAssistantError("llama.cpp returned an empty response")
-
-    return text
-
-
-def strip_thinking(text: str) -> str:
-    """Remove reasoning blocks that leaked into the content."""
-    text = THINK_BLOCK.sub("", text)
-    lower_text = text.lower()
-    if "</think" in lower_text or "</thinking" in lower_text or "</reasoning" in lower_text:
-        text = UNCLOSED_THINK_BLOCK.sub("", text)
-    return text

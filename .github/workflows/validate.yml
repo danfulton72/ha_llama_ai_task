@@ -1,23 +1,80 @@
-name: Validate
+name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
+    branches: [main]
+  release:
+    types: [published]
+  schedule:
+    - cron: "17 3 * * 1"
   workflow_dispatch:
 
-permissions: read-all
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  hacs:
+  python:
+    name: Python tests and lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: hacs/action@main
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v6
         with:
-          category: integration
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: requirements_test.txt
+      - name: Install test dependencies
+        run: python -m pip install -r requirements_test.txt
+      - name: Compile
+        run: python -m compileall -q custom_components scripts tests
+      - name: Ruff lint
+        run: ruff check .
+      - name: Pytest
+        run: pytest --cov=custom_components.llama_cpp_ai_task --cov-report=term-missing
 
   hassfest:
+    name: Hassfest
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: home-assistant/actions/hassfest@master
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Hassfest validation
+        uses: home-assistant/actions/hassfest@master
+
+  hacs:
+    name: HACS
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: HACS validation
+        uses: hacs/action@main
+        with:
+          category: integration
+          # Remove these ignores once repository description/topics are set.
+          ignore: description topics
+
+  release-consistency:
+    name: Release consistency
+    runs-on: ubuntu-latest
+    # A release workflow first atomically pushes its version commit + tag, then
+    # publishes the GitHub Release. Skip only that transient bot commit; the
+    # release event and scheduled CI perform the strict consistency check.
+    if: >-
+      github.event_name != 'pull_request' &&
+      !(github.event_name == 'push' && startsWith(github.event.head_commit.message, 'Release v'))
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Compare manifest to newest published GitHub release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/check_release_consistency.py --allow-no-release
