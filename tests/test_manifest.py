@@ -53,3 +53,4 @@ def test_release_workflow_runs_after_successful_main_ci() -> None:
     assert "python scripts/check_release_consistency.py" in workflow
     assert "git push --atomic origin HEAD:main" in workflow
     assert "gh release create" in workflow
+    assert '--expected-tag "${TAG}"' in workflow
