@@ -182,8 +182,23 @@ jobs:
             dist/llama_cpp_ai_task.zip.sha256
 
       - name: Verify published release consistency
+        shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
-          python scripts/release.py check-tag "${{ steps.version.outputs.tag }}"
-          python scripts/check_release_consistency.py
+          python scripts/release.py check-tag "${TAG}"
+          # The releases collection can briefly lag immediately after creation.
+          # Verify the exact release we just published, retrying only for API
+          # propagation. Normal CI still compares against the newest release.
+          for attempt in 1 2 3 4 5; do
+            if python scripts/check_release_consistency.py --expected-tag "${TAG}"; then
+              exit 0
+            fi
+            if [[ "${attempt}" == "5" ]]; then
+              break
+            fi
+            echo "Release ${TAG} is not visible by tag yet; retrying (${attempt}/5)."
+            sleep 2
+          done
+          exit 1
