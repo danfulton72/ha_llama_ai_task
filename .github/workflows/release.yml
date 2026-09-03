@@ -1,0 +1,201 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (X.Y.Z)"
+        required: true
+        type: string
+      prerelease:
+        description: "Mark the GitHub Release as a prerelease"
+        required: true
+        default: false
+        type: boolean
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/release.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: requirements_test.txt
+
+      - name: Resolve release version
+        id: version
+        shell: bash
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            VERSION="$(python scripts/release.py normalize "${REQUESTED_VERSION}")"
+          else
+            if gh release view --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+              echo "A GitHub Release already exists; bootstrap is complete."
+              echo "skip=true" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+            VERSION="$(python scripts/release.py get)"
+          fi
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "tag=v${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "skip=false" >> "${GITHUB_OUTPUT}"
+
+      - name: Validate current released state
+        if: steps.version.outputs.skip != 'true' && github.event_name == 'workflow_dispatch'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/check_release_consistency.py
+
+      - name: Inspect requested tag
+        id: state
+        if: steps.version.outputs.skip != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "${TAG} is already a published GitHub Release" >&2
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "Existing tag ${TAG} found without a GitHub Release; entering recovery mode."
+            git fetch origin "refs/tags/${TAG}:refs/tags/${TAG}"
+            git checkout "${TAG}"
+            python scripts/release.py check-tag "${TAG}"
+            echo "recovery=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "recovery=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Validate version increment
+        if: >-
+          steps.version.outputs.skip != 'true' &&
+          github.event_name == 'workflow_dispatch' &&
+          steps.state.outputs.recovery != 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          CURRENT="$(python scripts/release.py get)"
+          python - "${CURRENT}" "${VERSION}" <<'PY'
+          import sys
+
+          current = tuple(map(int, sys.argv[1].split(".")))
+          requested = tuple(map(int, sys.argv[2].split(".")))
+          if requested <= current:
+              raise SystemExit(
+                  f"Requested version {sys.argv[2]} must be greater than current {sys.argv[1]}"
+              )
+          PY
+
+      - name: Synchronize manifest from release version
+        if: >-
+          steps.version.outputs.skip != 'true' &&
+          github.event_name == 'workflow_dispatch' &&
+          steps.state.outputs.recovery != 'true'
+        run: python scripts/release.py set "${{ steps.version.outputs.version }}"
+
+      - name: Install test dependencies
+        if: steps.version.outputs.skip != 'true'
+        run: python -m pip install -r requirements_test.txt
+
+      - name: Quality gates
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          python -m compileall -q custom_components scripts tests
+          ruff check .
+          ruff format --check .
+          pytest
+
+      - name: Commit version and create tag
+        if: >-
+          steps.version.outputs.skip != 'true' &&
+          github.event_name == 'workflow_dispatch' &&
+          steps.state.outputs.recovery != 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add custom_components/llama_cpp_ai_task/manifest.json
+          if git diff --cached --quiet; then
+            echo "manifest.json did not change for ${VERSION}" >&2
+            exit 1
+          fi
+          git commit -m "Release ${TAG}"
+          git tag -a "${TAG}" -m "${TAG}"
+          git push --atomic origin HEAD:main "refs/tags/${TAG}"
+
+      - name: Create bootstrap tag
+        if: >-
+          steps.version.outputs.skip != 'true' &&
+          github.event_name == 'push' &&
+          steps.state.outputs.recovery != 'true'
+        shell: bash
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          python scripts/release.py check-tag "${TAG}"
+          git tag -a "${TAG}" -m "${TAG}"
+          git push origin "refs/tags/${TAG}"
+
+      - name: Build release archive
+        if: steps.version.outputs.skip != 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mkdir -p dist
+          zip -qr "dist/llama_cpp_ai_task-${VERSION}.zip" custom_components/llama_cpp_ai_task
+          sha256sum "dist/llama_cpp_ai_task-${VERSION}.zip" > "dist/llama_cpp_ai_task-${VERSION}.zip.sha256"
+
+      - name: Publish GitHub Release
+        if: steps.version.outputs.skip != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          EXTRA=()
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${PRERELEASE}" == "true" ]]; then
+            EXTRA+=(--prerelease)
+          fi
+          gh release create "${TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --verify-tag \
+            --title "${TAG}" \
+            --generate-notes \
+            "${EXTRA[@]}" \
+            "dist/llama_cpp_ai_task-${VERSION}.zip" \
+            "dist/llama_cpp_ai_task-${VERSION}.zip.sha256"
+
+      - name: Verify released tag matches manifest
+        if: steps.version.outputs.skip != 'true'
+        run: python scripts/release.py check-tag "${{ steps.version.outputs.tag }}"
