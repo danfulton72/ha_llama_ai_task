@@ -1,10 +1,14 @@
-"""Minimal async client for the llama.cpp HTTP server (``llama-server``).
+"""Minimal async client for llama.cpp HTTP servers and llama-swap.
 
 Only the endpoints needed by this integration are implemented:
 
 * ``GET  /props``               - server introspection (model, build, modalities)
 * ``GET  /v1/models``           - list servable models
 * ``POST /v1/chat/completions`` - OpenAI-compatible chat completion
+
+Plain ``llama-server`` exposes ``/props`` directly. ``llama-swap`` routes the
+same endpoint only after a model is identified, so discovery falls back to the
+loaded model reported by ``/v1/models`` and retries ``/props?model=<id>``.
 """
 
 from __future__ import annotations
@@ -88,18 +92,37 @@ class LlamaCppServerInfo:
         return bool(self.modalities.get("audio"))
 
 
+def normalize_base_url(base_url: str) -> str:
+    """Normalize a llama.cpp URL to the server root.
+
+    Users commonly paste the OpenAI-compatible ``.../v1`` base URL. llama.cpp
+    exposes introspection endpoints such as ``/props`` one level above it, so
+    accept either spelling and store/use the root consistently.
+    """
+    normalized = base_url.rstrip("/")
+    if normalized.lower().endswith("/v1"):
+        normalized = normalized[:-3].rstrip("/")
+    return normalized
+
+
 class LlamaCppClient:
     """Thin wrapper around the llama.cpp server HTTP API."""
 
     def __init__(self, session: aiohttp.ClientSession, base_url: str) -> None:
         """Initialize the client."""
         self._session = session
-        self._base_url = base_url.rstrip("/")
+        self._base_url = normalize_base_url(base_url)
+        self._default_model: str | None = None
 
     @property
     def base_url(self) -> str:
-        """Return the base URL of the server."""
+        """Return the normalized base URL of the server."""
         return self._base_url
+
+    @property
+    def default_model(self) -> str | None:
+        """Return the model automatically selected for a routed server."""
+        return self._default_model
 
     async def _request(
         self,
@@ -107,6 +130,7 @@ class LlamaCppClient:
         path: str,
         *,
         json: dict[str, Any] | None = None,
+        params: dict[str, str] | None = None,
         timeout: float = DEFAULT_TIMEOUT,
     ) -> Any:
         """Perform a request and return the decoded JSON body."""
@@ -116,18 +140,19 @@ class LlamaCppClient:
                 method,
                 url,
                 json=json,
+                params=params,
                 timeout=aiohttp.ClientTimeout(total=timeout),
             ) as response:
                 body = await response.text()
                 if response.status >= 400:
                     raise LlamaCppResponseError(
-                        _error_message(body, response.status, url)
+                        _error_message(body, response.status, str(response.url))
                     )
                 try:
                     return await response.json(content_type=None)
                 except ValueError as err:
                     raise LlamaCppResponseError(
-                        f"{url} returned a non-JSON response: {body[:200]}"
+                        f"{response.url} returned a non-JSON response: {body[:200]}"
                     ) from err
         except TimeoutError as err:
             raise LlamaCppConnectionError(
@@ -136,12 +161,25 @@ class LlamaCppClient:
         except aiohttp.ClientError as err:
             raise LlamaCppConnectionError(f"Error talking to {url}: {err}") from err
 
-    async def async_get_server_info(self) -> LlamaCppServerInfo:
+    async def async_get_server_info(self, model: str | None = None) -> LlamaCppServerInfo:
         """Fetch ``/props`` and return the parsed server info."""
-        props = await self._request("GET", "/props", timeout=PROPS_TIMEOUT)
+        params = {"model": model} if model else None
+        props = await self._request(
+            "GET", "/props", params=params, timeout=PROPS_TIMEOUT
+        )
         if not isinstance(props, dict):
             raise LlamaCppResponseError("Unexpected /props payload")
         return LlamaCppServerInfo(props)
+
+    async def _async_list_model_records(self) -> list[dict[str, Any]]:
+        """Return raw model records from the OpenAI-compatible model list."""
+        result = await self._request("GET", "/v1/models", timeout=PROPS_TIMEOUT)
+        if not isinstance(result, dict):
+            return []
+        data = result.get("data", [])
+        if not isinstance(data, list):
+            return []
+        return [model for model in data if isinstance(model, dict)]
 
     async def async_list_models(self) -> list[str]:
         """Return the model ids the server is willing to serve.
@@ -151,30 +189,85 @@ class LlamaCppClient:
         model field is optional - so an empty list is returned on error.
         """
         try:
-            result = await self._request("GET", "/v1/models", timeout=PROPS_TIMEOUT)
+            records = await self._async_list_model_records()
         except LlamaCppError as err:
             LOGGER.debug("Could not list models: %s", err)
             return []
-        if not isinstance(result, dict):
-            return []
         return [
             model["id"]
-            for model in result.get("data", [])
-            if isinstance(model, dict) and isinstance(model.get("id"), str)
+            for model in records
+            if isinstance(model.get("id"), str) and model["id"]
         ]
+
+    async def async_detect_server_info(self) -> LlamaCppServerInfo:
+        """Discover a direct llama-server or a model-routed llama-swap server."""
+        try:
+            info = await self.async_get_server_info()
+        except LlamaCppResponseError as direct_error:
+            try:
+                records = await self._async_list_model_records()
+            except LlamaCppError:
+                raise direct_error
+
+            swap_records = [model for model in records if _is_llama_swap_model(model)]
+            if not swap_records:
+                raise direct_error
+
+            # Prefer a model that llama-swap already has loaded so integration
+            # setup does not unnecessarily cold-start another model. If none is
+            # loaded, use the first configured model and let llama-swap load it.
+            swap_records.sort(key=lambda model: not _model_is_loaded(model))
+            for model in swap_records:
+                model_id = model.get("id")
+                if not isinstance(model_id, str) or not model_id:
+                    continue
+                try:
+                    info = await self.async_get_server_info(model_id)
+                except LlamaCppError as err:
+                    LOGGER.debug(
+                        "Could not inspect llama-swap model %s: %s", model_id, err
+                    )
+                    continue
+                self._default_model = model_id
+                LOGGER.debug("Detected llama-swap; routing through model %s", model_id)
+                return info
+
+            raise direct_error
+
+        self._default_model = None
+        return info
 
     async def async_chat_completion(
         self, payload: dict[str, Any], *, timeout: float = DEFAULT_TIMEOUT
     ) -> dict[str, Any]:
         """Call ``/v1/chat/completions`` and return the raw response."""
+        request_payload = payload
+        if self._default_model and not payload.get("model"):
+            # Do not mutate the entity's payload; callers may log/reuse it.
+            request_payload = {**payload, "model": self._default_model}
+
         result = await self._request(
-            "POST", "/v1/chat/completions", json=payload, timeout=timeout
+            "POST", "/v1/chat/completions", json=request_payload, timeout=timeout
         )
         if not isinstance(result, dict):
             raise LlamaCppResponseError("Unexpected chat completion payload")
         if error := result.get("error"):
             raise LlamaCppResponseError(str(error))
         return result
+
+
+def _is_llama_swap_model(model: dict[str, Any]) -> bool:
+    """Return whether a model record identifies llama-swap."""
+    if model.get("owned_by") == "llama-swap":
+        return True
+    meta = model.get("meta")
+    return isinstance(meta, dict) and isinstance(meta.get("llamaswap"), dict)
+
+
+def _model_is_loaded(model: dict[str, Any]) -> bool:
+    """Return whether llama-swap reports a model as already loaded."""
+    status = model.get("status")
+    return isinstance(status, dict) and status.get("value") == "loaded"
 
 
 def _error_message(body: str, status: int, url: str) -> str:
