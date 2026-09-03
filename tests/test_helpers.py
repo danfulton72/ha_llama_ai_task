@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import pytest
-import voluptuous as vol
 from homeassistant.exceptions import HomeAssistantError
+import voluptuous as vol
 
 from custom_components.llama_cpp_ai_task.ai_task import (
     _clean_schema,
