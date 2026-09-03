@@ -1,5 +1,7 @@
-homeassistant>=2026.9.0,<2026.10.0
-pytest>=8.4,<9
-pytest-asyncio>=1.1,<2
-pytest-cov>=6,<8
-ruff>=0.12,<1
+# Keep a supported Home Assistant range for local/release checks. CI installs
+# explicit 2026.8.0 and 2026.9.0 versions to exercise both compatibility paths.
+homeassistant>=2026.8.0,<2027.0.0
+pytest>=9.1.1,<10
+pytest-asyncio>=1.4.0,<2
+pytest-cov>=7.1.0,<8
+ruff>=0.16.5,<1
