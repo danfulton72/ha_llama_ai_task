@@ -18,7 +18,7 @@ from homeassistant.helpers import template
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity import Entity
 
-from .client import LlamaCppAuthError, LlamaCppClient, LlamaCppError, LlamaCppServerInfo
+from .client import LlamaCppClient, LlamaCppError, LlamaCppServerInfo
 from .const import (
     CONF_MAX_TOKENS,
     CONF_MODEL,
@@ -98,8 +98,6 @@ class LlamaCppBaseLLMEntity(Entity):
         payload: dict[str, Any] = {
             "messages": messages,
             "stream": False,
-            # Reuse the KV cache between calls; big win for repeated tasks that
-            # share a system prompt.
             "cache_prompt": True,
             "max_tokens": int(options.get(CONF_MAX_TOKENS, DEFAULT_MAX_TOKENS)),
             "temperature": float(options.get(CONF_TEMPERATURE, DEFAULT_TEMPERATURE)),
@@ -114,17 +112,9 @@ class LlamaCppBaseLLMEntity(Entity):
             payload["model"] = model
 
         if not options.get(CONF_THINKING, DEFAULT_THINKING):
-            # Honoured by hybrid-reasoning templates (Qwen3, GLM, ...) and
-            # ignored by templates that do not use the variable. Constrained
-            # decoding and long thinking blocks do not mix well, so thinking is
-            # off unless the user asks for it.
             payload["chat_template_kwargs"] = {"enable_thinking": False}
 
         if json_schema is not None:
-            # Current llama.cpp reads the OpenAI-compatible nested schema shape.
-            # Do not send OpenAI's `strict` flag: the schemas Home Assistant
-            # produces do not guarantee strict-mode requirements such as every
-            # property being required and `additionalProperties: false`.
             payload["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {
@@ -144,10 +134,6 @@ class LlamaCppBaseLLMEntity(Entity):
             response = await self.client.async_chat_completion(
                 payload, timeout=float(options.get(CONF_TIMEOUT, DEFAULT_TIMEOUT))
             )
-        except LlamaCppAuthError as err:
-            raise HomeAssistantError(
-                "The llama.cpp server rejected the API key"
-            ) from err
         except LlamaCppError as err:
             raise HomeAssistantError(f"Error talking to llama.cpp: {err}") from err
 
@@ -156,11 +142,7 @@ class LlamaCppBaseLLMEntity(Entity):
     async def _async_build_messages(
         self, chat_log: conversation.ChatLog
     ) -> list[dict[str, Any]]:
-        """Convert the chat log into llama.cpp chat messages.
-
-        All system content is merged into a single leading message: several chat
-        templates reject more than one system turn.
-        """
+        """Convert the chat log into llama.cpp chat messages."""
         system_parts: list[str] = []
         messages: list[dict[str, Any]] = []
 
@@ -175,17 +157,12 @@ class LlamaCppBaseLLMEntity(Entity):
                 messages.append(await self._async_user_message(content))
             elif isinstance(content, conversation.AssistantContent):
                 if content.content:
-                    messages.append(
-                        {"role": "assistant", "content": content.content}
-                    )
+                    messages.append({"role": "assistant", "content": content.content})
             else:
-                # Tool calls are not exposed by this integration.
                 LOGGER.debug("Skipping unsupported chat content %s", type(content))
 
         if system_parts:
-            messages.insert(
-                0, {"role": "system", "content": "\n\n".join(system_parts)}
-            )
+            messages.insert(0, {"role": "system", "content": "\n\n".join(system_parts)})
 
         return messages
 
@@ -255,7 +232,6 @@ class LlamaCppBaseLLMEntity(Entity):
                     "Sending audio to a llama.cpp server that does not report "
                     "audio support; start llama-server with --mmproj"
                 )
-            # llama.cpp accepts wav and mp3 for audio input.
             audio_format = mime_type.rsplit("/", 1)[-1].lower()
             if audio_format in ("mpeg", "mpga", "mp3"):
                 audio_format = "mp3"
@@ -272,6 +248,5 @@ class LlamaCppBaseLLMEntity(Entity):
             }
 
         raise HomeAssistantError(
-            f"Unsupported attachment type `{mime_type}`; llama.cpp accepts "
-            "images and audio"
+            f"Unsupported attachment type `{mime_type}`; llama.cpp accepts images and audio"
         )
