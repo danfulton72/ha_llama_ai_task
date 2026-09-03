@@ -1,4 +1,9 @@
 homeassistant>=2026.9.0,<2026.10.0
+# Tests import Home Assistant's conversation module directly, outside HA's
+# integration dependency loader, so include its 2026.9.0 runtime requirements.
+gazetteer-matcher==1.1.0
+hassil==3.12.0
+home-assistant-intents==2026.8.28
 pytest>=8.4,<9
 pytest-asyncio>=1.1,<2
 pytest-cov>=6,<8
