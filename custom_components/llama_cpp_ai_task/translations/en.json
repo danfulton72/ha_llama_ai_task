@@ -1,0 +1,83 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to llama.cpp",
+        "description": "Enter the address of your llama-server instance. Start the server with --jinja so that chat templates and JSON schemas are handled correctly.",
+        "data": {
+          "url": "Server URL",
+          "api_key": "API key"
+        },
+        "data_description": {
+          "url": "For example http://192.168.1.10:8080",
+          "api_key": "Only needed if llama-server was started with --api-key"
+        }
+      },
+      "reconfigure": {
+        "title": "Reconfigure llama.cpp",
+        "data": {
+          "url": "Server URL",
+          "api_key": "API key"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate with llama.cpp",
+        "description": "The server at {url} rejected the current API key.",
+        "data": {
+          "api_key": "API key"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect. Check that llama-server is running and reachable from Home Assistant.",
+      "invalid_auth": "The server rejected the API key.",
+      "invalid_server": "The address responded, but does not look like a llama.cpp server.",
+      "unknown": "Unexpected error"
+    },
+    "abort": {
+      "already_configured": "This server is already configured",
+      "reauth_successful": "Re-authentication was successful",
+      "reconfigure_successful": "Re-configuration was successful"
+    }
+  },
+  "config_subentries": {
+    "ai_task_data": {
+      "title": "AI task",
+      "entry_type": "AI task",
+      "initiate_flow": {
+        "user": "Add AI task entity",
+        "reconfigure": "Reconfigure AI task entity"
+      },
+      "step": {
+        "set_options": {
+          "title": "AI task options",
+          "description": "The server reports {model} with a context size of {n_ctx} tokens.",
+          "data": {
+            "name": "Name",
+            "model": "Model",
+            "prompt": "Extra instructions",
+            "max_tokens": "Maximum tokens to return",
+            "temperature": "Temperature",
+            "top_p": "Top P",
+            "top_k": "Top K",
+            "repeat_penalty": "Repeat penalty",
+            "timeout": "Request timeout (seconds)",
+            "thinking": "Allow the model to think",
+            "attachments": "Support attachments"
+          },
+          "data_description": {
+            "model": "Leave empty unless the server hosts more than one model.",
+            "prompt": "Added to the system prompt for every task.",
+            "max_tokens": "Structured answers need enough room; the request fails if the model is cut off.",
+            "temperature": "Lower values give more repeatable results. 0.2-0.5 works well for data tasks.",
+            "thinking": "Only affects hybrid reasoning models. Thinking and constrained JSON output do not combine well.",
+            "attachments": "Requires llama-server to be started with a multimodal projector (--mmproj)."
+          }
+        }
+      },
+      "abort": {
+        "reconfigure_successful": "Re-configuration was successful"
+      }
+    }
+  }
+}
