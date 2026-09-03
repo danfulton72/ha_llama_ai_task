@@ -39,9 +39,8 @@
       "step": {
         "set_options": {
           "title": "AI task options",
-          "description": "The server reports {model} with a context size of {n_ctx} tokens.",
+          "description": "The server reports {model} with a context size of {n_ctx} tokens. The selected model determines the AI Task name.",
           "data": {
-            "name": "Name",
             "model": "Model",
             "prompt": "Extra instructions",
             "max_tokens": "Maximum tokens to return",
@@ -54,7 +53,7 @@
             "attachments": "Always allow attachments"
           },
           "data_description": {
-            "model": "Leave empty unless the server hosts more than one model.",
+            "model": "The model ID also determines the AI Task entity name.",
             "prompt": "Added to the system prompt for every task. Rendered as a Home Assistant template, so {{ states('sensor.example') }} works.",
             "max_tokens": "Structured answers need enough room; the request fails if the model is cut off.",
             "temperature": "Lower values give more repeatable results. 0.2-0.5 works well for data tasks.",
