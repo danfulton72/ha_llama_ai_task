@@ -37,6 +37,7 @@ from .client import (
     LlamaCppConnectionError,
     LlamaCppError,
     LlamaCppServerInfo,
+    normalize_base_url,
 )
 from .const import (
     AI_TASK_SUBENTRY_TYPE,
@@ -84,7 +85,7 @@ class LlamaCppConfigFlow(ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            url = user_input[CONF_URL].rstrip("/")
+            url = normalize_base_url(user_input[CONF_URL])
             self._async_abort_entries_match({CONF_URL: url})
 
             info, error = await self._async_try_connect(url)
@@ -125,7 +126,7 @@ class LlamaCppConfigFlow(ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            url = user_input[CONF_URL].rstrip("/")
+            url = normalize_base_url(user_input[CONF_URL])
             for other in self._async_current_entries():
                 if other.entry_id != entry.entry_id and other.data.get(CONF_URL) == url:
                     return self.async_abort(reason="already_configured")
@@ -152,7 +153,7 @@ class LlamaCppConfigFlow(ConfigFlow, domain=DOMAIN):
         """Try to reach the server, returning (server_info, error_key)."""
         client = LlamaCppClient(async_get_clientsession(self.hass), url)
         try:
-            return await client.async_get_server_info(), None
+            return await client.async_detect_server_info(), None
         except LlamaCppConnectionError:
             return None, "cannot_connect"
         except LlamaCppError as err:
@@ -209,6 +210,8 @@ class LlamaCppSubentryFlowHandler(ConfigSubentryFlow):
         if is_new:
             # CONF_ATTACHMENTS is a force-on override, not the detected value.
             defaults: dict[str, Any] = {CONF_NAME: DEFAULT_AI_TASK_NAME}
+            if runtime and runtime.client.default_model:
+                defaults[CONF_MODEL] = runtime.client.default_model
         else:
             subentry = self._get_reconfigure_subentry()
             defaults = {CONF_NAME: subentry.title, **subentry.data}
