@@ -64,8 +64,7 @@ class LlamaCppBaseLLMEntity(Entity):
 
         model_id = (
             subentry.data.get(CONF_MODEL)
-            or entry.runtime_data.client.default_model
-            or entry.runtime_data.info.model_name
+            or entry.runtime_data.model
             or subentry.title
         )
         self._attr_name = model_name_to_title(str(model_id))
