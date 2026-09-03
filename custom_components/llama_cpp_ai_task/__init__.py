@@ -5,17 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_API_KEY, CONF_URL, Platform
+from homeassistant.const import CONF_URL, Platform
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .client import (
-    LlamaCppAuthError,
-    LlamaCppClient,
-    LlamaCppError,
-    LlamaCppServerInfo,
-)
+from .client import LlamaCppClient, LlamaCppError, LlamaCppServerInfo
 from .const import LOGGER
 
 PLATFORMS: tuple[Platform, ...] = (Platform.AI_TASK,)
@@ -37,13 +32,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: LlamaCppConfigEntry) -> 
     client = LlamaCppClient(
         async_get_clientsession(hass),
         entry.data[CONF_URL],
-        entry.data.get(CONF_API_KEY),
     )
 
     try:
         info = await client.async_get_server_info()
-    except LlamaCppAuthError as err:
-        raise ConfigEntryAuthFailed(str(err)) from err
     except LlamaCppError as err:
         # The server may simply still be loading the model.
         raise ConfigEntryNotReady(str(err)) from err
