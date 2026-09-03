@@ -63,15 +63,15 @@
             "repeat_penalty": "Repeat penalty",
             "timeout": "Request timeout (seconds)",
             "thinking": "Allow the model to think",
-            "attachments": "Support attachments"
+            "attachments": "Always allow attachments"
           },
           "data_description": {
             "model": "Leave empty unless the server hosts more than one model.",
-            "prompt": "Added to the system prompt for every task.",
+            "prompt": "Added to the system prompt for every task. Rendered as a Home Assistant template, so {{ states('sensor.example') }} works.",
             "max_tokens": "Structured answers need enough room; the request fails if the model is cut off.",
             "temperature": "Lower values give more repeatable results. 0.2-0.5 works well for data tasks.",
             "thinking": "Only affects hybrid reasoning models. Thinking and constrained JSON output do not combine well.",
-            "attachments": "Requires llama-server to be started with a multimodal projector (--mmproj)."
+            "attachments": "Attachments are offered automatically when the server reports vision or audio support. Turn this on for builds that do not report their modalities. Either way llama-server must be started with a multimodal projector (--mmproj)."
           }
         }
       },
