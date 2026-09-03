@@ -16,7 +16,7 @@ A HACS-installable custom integration that exposes a local `llama.cpp` (`llama-s
 
 ## Requirements
 
-- Home Assistant 2025.7 or newer.
+- Home Assistant 2026.8 or newer. Home Assistant 2026.9 replaced `voluptuous-openapi` with `probatio`; the integration detects which converter Core ships and uses it.
 - HACS for HACS installation.
 - A reachable recent `llama-server` build.
 
@@ -65,13 +65,13 @@ An AI Task entity is created automatically. Additional task entities can be adde
 | Option | Default | Notes |
 | --- | --- | --- |
 | Model | empty | Only needed when the server exposes more than one model. |
-| Extra instructions | empty | Added to the system prompt for each request. |
+| Extra instructions | empty | Added to the system prompt for each request. Rendered as a Home Assistant template. |
 | Maximum tokens | 1024 | Raise for larger structured responses. |
 | Temperature | 0.4 | Lower values are usually better for deterministic data tasks. |
 | Top P / Top K / Repeat penalty | 0.95 / 40 / 1.1 | Passed to llama.cpp. |
 | Request timeout | 120 s | Increase for slow CPU inference or large models. |
 | Allow the model to think | off | Usually best left off for constrained JSON output. |
-| Support attachments | auto-detected | Can be forced on for builds that do not report modalities. |
+| Always allow attachments | off | Attachments are offered automatically when the server reports vision or audio support. Force this on for builds that do not report their modalities. |
 
 ## Structured data example
 
@@ -126,6 +126,7 @@ Hybrid reasoning models are asked not to think by default using `chat_template_k
 - This integration does not implement Home Assistant LLM tool calling.
 - It does not provide a conversation agent; Home Assistant Core's `llama.cpp` integration already covers that use case.
 - Attachments must resolve to local files and are inlined into the request.
+- Structured output is requested as `response_format.json_schema.schema`, which needs a llama.cpp build recent enough to read that field.
 - llama.cpp has had releases where structured-output constraints could fail open. This integration therefore validates the final data again in Home Assistant and fails the task if the structure does not match.
 - Streaming and image generation are not implemented.
 
@@ -159,6 +160,7 @@ custom_components/llama_cpp_ai_task/
 ├── config_flow.py
 ├── const.py
 ├── entity.py
+├── helpers.py
 ├── manifest.json
 ├── brand/
 │   └── icon.png
