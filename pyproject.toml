@@ -9,7 +9,7 @@ line-length = 88
 src = ["custom_components", "scripts", "tests"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
+select = ["E", "F", "UP", "B"]
 ignore = ["E501"]
 
 [tool.ruff.format]
