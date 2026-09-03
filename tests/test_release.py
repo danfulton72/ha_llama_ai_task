@@ -82,3 +82,46 @@ def test_newest_published_release_includes_prereleases() -> None:
 
 def test_newest_published_release_handles_empty_list() -> None:
     assert release_consistency._newest_published_tag([]) is None
+
+
+def test_validate_expected_release_accepts_published_tag() -> None:
+    release_consistency._validate_expected_release(
+        {
+            "tag_name": "v1.0.2",
+            "draft": False,
+            "published_at": "2026-09-03T21:30:00Z",
+        },
+        "v1.0.2",
+    )
+
+
+@pytest.mark.parametrize(
+    ("release_data", "match"),
+    [
+        (
+            {
+                "tag_name": "v1.0.1",
+                "draft": False,
+                "published_at": "2026-09-03T21:30:00Z",
+            },
+            "Expected GitHub release",
+        ),
+        (
+            {
+                "tag_name": "v1.0.2",
+                "draft": True,
+                "published_at": "2026-09-03T21:30:00Z",
+            },
+            "still a draft",
+        ),
+        (
+            {"tag_name": "v1.0.2", "draft": False, "published_at": None},
+            "is not published",
+        ),
+    ],
+)
+def test_validate_expected_release_rejects_invalid_state(
+    release_data: dict[str, object], match: str
+) -> None:
+    with pytest.raises(ValueError, match=match):
+        release_consistency._validate_expected_release(release_data, "v1.0.2")
