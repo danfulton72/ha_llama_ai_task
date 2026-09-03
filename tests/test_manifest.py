@@ -40,3 +40,16 @@ def test_hacs_metadata() -> None:
     escaped = re.escape(hacs["filename"])
     assert re.search(rf"zip -qr .*dist/{escaped}", workflow)
     assert f"dist/{hacs['filename']}" in workflow
+
+
+def test_release_workflow_runs_after_successful_main_ci() -> None:
+    workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+    assert "workflow_run:" in workflow
+    assert 'workflows: ["CI"]' in workflow
+    assert "branches: [main]" in workflow
+    assert "github.event.workflow_run.event == 'push'" in workflow
+    assert "github.event.workflow_run.conclusion == 'success'" in workflow
+    assert "python scripts/release.py next-patch" in workflow
+    assert "python scripts/check_release_consistency.py" in workflow
+    assert "git push --atomic origin HEAD:main" in workflow
+    assert "gh release create" in workflow
