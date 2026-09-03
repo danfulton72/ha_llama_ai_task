@@ -11,14 +11,13 @@ A HACS-installable custom integration that exposes a local `llama.cpp` (`llama-s
 - Image and audio attachments when `llama-server` supports them.
 - Per-task model and sampler settings.
 - Prompt-cache reuse with `cache_prompt`.
-- Optional API-key authentication.
 - No cloud service calls from the integration.
 
 ## Requirements
 
 - Home Assistant 2026.8 or newer. Home Assistant 2026.9 replaced `voluptuous-openapi` with `probatio`; the integration detects which converter Core ships and uses it.
 - HACS for HACS installation.
-- A reachable recent `llama-server` build.
+- A reachable recent `llama-server` build that does not require HTTP authentication.
 
 ## Start llama-server
 
@@ -29,8 +28,7 @@ llama-server \
   -hf unsloth/Qwen3-8B-GGUF:Q4_K_M \
   --jinja \
   --host 0.0.0.0 --port 8080 \
-  -c 8192 \
-  --api-key changeme
+  -c 8192
 ```
 
 For vision tasks, start the server with a multimodal projector, for example:
@@ -58,7 +56,7 @@ Manual installation is also possible by copying `custom_components/llama_cpp_ai_
 
 ## Configure
 
-Enter the base URL of `llama-server`, for example `http://192.168.1.10:8080`, and an API key if the server requires one. Do **not** append `/v1`; the integration adds the endpoint paths itself.
+Enter the base URL of `llama-server`, for example `http://192.168.1.10:8080`. Do **not** append `/v1`; the integration adds the endpoint paths itself.
 
 An AI Task entity is created automatically. Additional task entities can be added as subentries, each with its own options.
 
@@ -125,6 +123,7 @@ Hybrid reasoning models are asked not to think by default using `chat_template_k
 
 - This integration does not implement Home Assistant LLM tool calling.
 - It does not provide a conversation agent; Home Assistant Core's `llama.cpp` integration already covers that use case.
+- The integration does not send API keys or other HTTP authorization credentials; use a llama-server endpoint that is reachable without authentication.
 - Attachments must resolve to local files and are inlined into the request.
 - Structured output is requested as `response_format.json_schema.schema`, which needs a llama.cpp build recent enough to read that field.
 - llama.cpp has had releases where structured-output constraints could fail open. This integration therefore validates the final data again in Home Assistant and fails the task if the structure does not match.
@@ -134,7 +133,7 @@ Hybrid reasoning models are asked not to think by default using `chat_template_k
 
 | Symptom | Likely cause |
 | --- | --- |
-| Failed to connect during setup | `llama-server` is not reachable from Home Assistant, is bound only to loopback, or a firewall is blocking it. |
+| Failed to connect during setup | `llama-server` is not reachable from Home Assistant, requires authentication, is bound only to loopback, or a firewall is blocking it. |
 | Config entry not ready after restart | The server/model is still starting; Home Assistant retries. |
 | Structured task fails validation | The model/server ignored or could not enforce the response schema. Try a newer llama.cpp build and keep thinking disabled. |
 | Task stops at token limit | Increase **Maximum tokens** or reduce the requested output. |
