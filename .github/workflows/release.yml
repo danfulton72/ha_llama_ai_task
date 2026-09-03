@@ -197,6 +197,10 @@ jobs:
             "dist/llama_cpp_ai_task-${VERSION}.zip" \
             "dist/llama_cpp_ai_task-${VERSION}.zip.sha256"
 
-      - name: Verify released tag matches manifest
+      - name: Verify published release consistency
         if: steps.version.outputs.skip != 'true'
-        run: python scripts/release.py check-tag "${{ steps.version.outputs.tag }}"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/release.py check-tag "${{ steps.version.outputs.tag }}"
+          python scripts/check_release_consistency.py
