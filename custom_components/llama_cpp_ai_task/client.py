@@ -207,11 +207,11 @@ class LlamaCppClient:
             try:
                 records = await self._async_list_model_records()
             except LlamaCppError:
-                raise direct_error
+                raise direct_error from None
 
             swap_records = [model for model in records if _is_llama_swap_model(model)]
             if not swap_records:
-                raise direct_error
+                raise direct_error from None
 
             # Prefer a model that llama-swap already has loaded so integration
             # setup does not unnecessarily cold-start another model. If none is
@@ -232,7 +232,7 @@ class LlamaCppClient:
                 LOGGER.debug("Detected llama-swap; routing through model %s", model_id)
                 return info
 
-            raise direct_error
+            raise direct_error from None
 
         self._default_model = None
         return info
