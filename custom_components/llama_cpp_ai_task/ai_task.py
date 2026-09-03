@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from probatio import to_openapi
 import voluptuous as vol
-from voluptuous_openapi import convert
 
 from homeassistant.components import ai_task, conversation
 from homeassistant.core import HomeAssistant
@@ -17,13 +17,6 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from . import LlamaCppConfigEntry
 from .const import AI_TASK_SUBENTRY_TYPE, CONF_ATTACHMENTS, LOGGER
 from .entity import LlamaCppBaseLLMEntity
-
-# `llm.selector_serializer` teaches voluptuous-openapi how to render Home
-# Assistant selectors. The name has been private in some releases, so look it
-# up defensively rather than failing to import.
-SELECTOR_SERIALIZER = getattr(llm, "selector_serializer", None) or getattr(
-    llm, "_selector_serializer", None
-)
 
 
 async def async_setup_entry(
@@ -102,11 +95,7 @@ def _to_json_schema(structure: vol.Schema) -> dict[str, Any]:
     llama.cpp compiles the schema into a GBNF grammar, so the output is
     guaranteed to match rather than merely requested.
     """
-    kwargs: dict[str, Any] = {}
-    if SELECTOR_SERIALIZER is not None:
-        kwargs["custom_serializer"] = SELECTOR_SERIALIZER
-
-    schema = convert(structure, **kwargs)
+    schema = to_openapi(structure, custom_serializer=llm.selector_serializer)
 
     if not isinstance(schema, dict):
         raise HomeAssistantError("Unsupported structure for llama.cpp")
