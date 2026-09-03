@@ -15,7 +15,6 @@ from homeassistant.components import conversation
 from homeassistant.config_entries import ConfigSubentry
 from homeassistant.exceptions import HomeAssistantError, TemplateError
 from homeassistant.helpers import template
-from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity import Entity
 
 from .client import LlamaCppClient, LlamaCppError, LlamaCppServerInfo
@@ -36,9 +35,7 @@ from .const import (
     DEFAULT_TIMEOUT,
     DEFAULT_TOP_K,
     DEFAULT_TOP_P,
-    DOMAIN,
     LOGGER,
-    MANUFACTURER,
 )
 from .helpers import _extract_text
 
@@ -56,19 +53,16 @@ class LlamaCppBaseLLMEntity(Entity):
     def __init__(
         self, entry: LlamaCppConfigEntry, subentry: ConfigSubentry
     ) -> None:
-        """Initialize the entity."""
+        """Initialize the entity.
+
+        AI Task entities are intentionally standalone entities, not Home Assistant
+        service devices. Creating a ``DeviceEntryType.SERVICE`` device here makes
+        the task look like another llama.cpp conversation service in the UI and can
+        visually group it with the Core llama.cpp integration.
+        """
         self.entry = entry
         self.subentry = subentry
         self._attr_unique_id = subentry.subentry_id
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, subentry.subentry_id)},
-            name=subentry.title,
-            manufacturer=MANUFACTURER,
-            model=subentry.data.get(CONF_MODEL) or self.server_info.model_name,
-            sw_version=self.server_info.build_info,
-            entry_type=DeviceEntryType.SERVICE,
-            configuration_url=self.client.base_url,
-        )
 
     @property
     def options(self) -> dict[str, Any]:
@@ -98,6 +92,8 @@ class LlamaCppBaseLLMEntity(Entity):
         payload: dict[str, Any] = {
             "messages": messages,
             "stream": False,
+            # Reuse the KV cache between calls; big win for repeated tasks that
+            # share a system prompt.
             "cache_prompt": True,
             "max_tokens": int(options.get(CONF_MAX_TOKENS, DEFAULT_MAX_TOKENS)),
             "temperature": float(options.get(CONF_TEMPERATURE, DEFAULT_TEMPERATURE)),
@@ -112,9 +108,17 @@ class LlamaCppBaseLLMEntity(Entity):
             payload["model"] = model
 
         if not options.get(CONF_THINKING, DEFAULT_THINKING):
+            # Honoured by hybrid-reasoning templates (Qwen3, GLM, ...) and
+            # ignored by templates that do not use the variable. Constrained
+            # decoding and long thinking blocks do not mix well, so thinking is
+            # off unless the user asks for it.
             payload["chat_template_kwargs"] = {"enable_thinking": False}
 
         if json_schema is not None:
+            # Current llama.cpp reads the OpenAI-compatible nested schema shape.
+            # Do not send OpenAI's `strict` flag: the schemas Home Assistant
+            # produces do not guarantee strict-mode requirements such as every
+            # property being required and `additionalProperties: false`.
             payload["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {
@@ -142,7 +146,11 @@ class LlamaCppBaseLLMEntity(Entity):
     async def _async_build_messages(
         self, chat_log: conversation.ChatLog
     ) -> list[dict[str, Any]]:
-        """Convert the chat log into llama.cpp chat messages."""
+        """Convert the chat log into llama.cpp chat messages.
+
+        All system content is merged into a single leading message: several chat
+        templates reject more than one system turn.
+        """
         system_parts: list[str] = []
         messages: list[dict[str, Any]] = []
 
@@ -157,12 +165,17 @@ class LlamaCppBaseLLMEntity(Entity):
                 messages.append(await self._async_user_message(content))
             elif isinstance(content, conversation.AssistantContent):
                 if content.content:
-                    messages.append({"role": "assistant", "content": content.content})
+                    messages.append(
+                        {"role": "assistant", "content": content.content}
+                    )
             else:
+                # Tool calls are not exposed by this integration.
                 LOGGER.debug("Skipping unsupported chat content %s", type(content))
 
         if system_parts:
-            messages.insert(0, {"role": "system", "content": "\n\n".join(system_parts)})
+            messages.insert(
+                0, {"role": "system", "content": "\n\n".join(system_parts)}
+            )
 
         return messages
 
@@ -232,6 +245,7 @@ class LlamaCppBaseLLMEntity(Entity):
                     "Sending audio to a llama.cpp server that does not report "
                     "audio support; start llama-server with --mmproj"
                 )
+            # llama.cpp accepts wav and mp3 for audio input.
             audio_format = mime_type.rsplit("/", 1)[-1].lower()
             if audio_format in ("mpeg", "mpga", "mp3"):
                 audio_format = "mp3"
@@ -248,5 +262,6 @@ class LlamaCppBaseLLMEntity(Entity):
             }
 
         raise HomeAssistantError(
-            f"Unsupported attachment type `{mime_type}`; llama.cpp accepts images and audio"
+            f"Unsupported attachment type `{mime_type}`; llama.cpp accepts "
+            "images and audio"
         )
