@@ -65,11 +65,16 @@ jobs:
   release-consistency:
     name: Release consistency
     runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
+    # A release workflow first atomically pushes its version commit + tag, then
+    # publishes the GitHub Release. Skip only that transient bot commit; the
+    # release event and scheduled CI perform the strict consistency check.
+    if: >-
+      github.event_name != 'pull_request' &&
+      !(github.event_name == 'push' && startsWith(github.event.head_commit.message, 'Release v'))
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Compare manifest to latest GitHub release
+      - name: Compare manifest to newest published GitHub release
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python scripts/check_release_consistency.py --allow-no-release
