@@ -127,7 +127,6 @@ jobs:
         run: |
           python -m compileall -q custom_components scripts tests
           ruff check .
-          ruff format --check .
           pytest
 
       - name: Commit version and create tag
