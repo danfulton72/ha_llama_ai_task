@@ -15,7 +15,7 @@ from homeassistant.config_entries import (
     ConfigSubentryFlow,
     SubentryFlowResult,
 )
-from homeassistant.const import CONF_API_KEY, CONF_NAME, CONF_URL
+from homeassistant.const import CONF_NAME, CONF_URL
 from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
@@ -33,7 +33,6 @@ from homeassistant.helpers.selector import (
 )
 
 from .client import (
-    LlamaCppAuthError,
     LlamaCppClient,
     LlamaCppConnectionError,
     LlamaCppError,
@@ -68,10 +67,7 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_URL, default=DEFAULT_URL): TextSelector(
             TextSelectorConfig(type=TextSelectorType.URL)
-        ),
-        vol.Optional(CONF_API_KEY): TextSelector(
-            TextSelectorConfig(type=TextSelectorType.PASSWORD)
-        ),
+        )
     }
 )
 
@@ -91,9 +87,7 @@ class LlamaCppConfigFlow(ConfigFlow, domain=DOMAIN):
             url = user_input[CONF_URL].rstrip("/")
             self._async_abort_entries_match({CONF_URL: url})
 
-            info, error = await self._async_try_connect(
-                url, user_input.get(CONF_API_KEY)
-            )
+            info, error = await self._async_try_connect(url)
             if error:
                 errors["base"] = error
             else:
@@ -101,7 +95,7 @@ class LlamaCppConfigFlow(ConfigFlow, domain=DOMAIN):
                 title = info.model_name or "llama.cpp"
                 return self.async_create_entry(
                     title=title,
-                    data={CONF_URL: url, CONF_API_KEY: user_input.get(CONF_API_KEY)},
+                    data={CONF_URL: url},
                     subentries=[
                         ConfigSubentryData(
                             subentry_type=AI_TASK_SUBENTRY_TYPE,
@@ -126,7 +120,7 @@ class LlamaCppConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Change the URL or API key of an existing entry."""
+        """Change the URL of an existing entry."""
         entry = self._get_reconfigure_entry()
         errors: dict[str, str] = {}
 
@@ -136,74 +130,29 @@ class LlamaCppConfigFlow(ConfigFlow, domain=DOMAIN):
                 if other.entry_id != entry.entry_id and other.data.get(CONF_URL) == url:
                     return self.async_abort(reason="already_configured")
 
-            _, error = await self._async_try_connect(
-                url, user_input.get(CONF_API_KEY)
-            )
+            _, error = await self._async_try_connect(url)
             if error:
                 errors["base"] = error
             else:
                 return self.async_update_reload_and_abort(
                     entry,
-                    data_updates={
-                        CONF_URL: url,
-                        CONF_API_KEY: user_input.get(CONF_API_KEY),
-                    },
+                    data_updates={CONF_URL: url},
                 )
 
         return self.async_show_form(
             step_id="reconfigure",
             data_schema=self.add_suggested_values_to_schema(
-                STEP_USER_DATA_SCHEMA, user_input or dict(entry.data)
+                STEP_USER_DATA_SCHEMA,
+                user_input or {CONF_URL: entry.data[CONF_URL]},
             ),
             errors=errors,
         )
 
-    async def async_step_reauth(
-        self, entry_data: dict[str, Any]
-    ) -> ConfigFlowResult:
-        """Handle re-authentication."""
-        return await self.async_step_reauth_confirm()
-
-    async def async_step_reauth_confirm(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Ask for a new API key."""
-        entry = self._get_reauth_entry()
-        errors: dict[str, str] = {}
-
-        if user_input is not None:
-            _, error = await self._async_try_connect(
-                entry.data[CONF_URL], user_input.get(CONF_API_KEY)
-            )
-            if error:
-                errors["base"] = error
-            else:
-                return self.async_update_reload_and_abort(
-                    entry, data_updates={CONF_API_KEY: user_input.get(CONF_API_KEY)}
-                )
-
-        return self.async_show_form(
-            step_id="reauth_confirm",
-            data_schema=vol.Schema(
-                {
-                    vol.Optional(CONF_API_KEY): TextSelector(
-                        TextSelectorConfig(type=TextSelectorType.PASSWORD)
-                    )
-                }
-            ),
-            errors=errors,
-            description_placeholders={CONF_URL: entry.data[CONF_URL]},
-        )
-
-    async def _async_try_connect(
-        self, url: str, api_key: str | None
-    ) -> tuple[Any, str | None]:
+    async def _async_try_connect(self, url: str) -> tuple[Any, str | None]:
         """Try to reach the server, returning (server_info, error_key)."""
-        client = LlamaCppClient(async_get_clientsession(self.hass), url, api_key)
+        client = LlamaCppClient(async_get_clientsession(self.hass), url)
         try:
             return await client.async_get_server_info(), None
-        except LlamaCppAuthError:
-            return None, "invalid_auth"
         except LlamaCppConnectionError:
             return None, "cannot_connect"
         except LlamaCppError as err:

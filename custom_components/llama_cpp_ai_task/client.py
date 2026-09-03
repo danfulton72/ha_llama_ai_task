@@ -26,10 +26,6 @@ class LlamaCppConnectionError(LlamaCppError):
     """Raised when the server cannot be reached."""
 
 
-class LlamaCppAuthError(LlamaCppError):
-    """Raised when the server rejects the API key."""
-
-
 class LlamaCppResponseError(LlamaCppError):
     """Raised when the server returns an error payload."""
 
@@ -95,28 +91,15 @@ class LlamaCppServerInfo:
 class LlamaCppClient:
     """Thin wrapper around the llama.cpp server HTTP API."""
 
-    def __init__(
-        self,
-        session: aiohttp.ClientSession,
-        base_url: str,
-        api_key: str | None = None,
-    ) -> None:
+    def __init__(self, session: aiohttp.ClientSession, base_url: str) -> None:
         """Initialize the client."""
         self._session = session
         self._base_url = base_url.rstrip("/")
-        self._api_key = api_key
 
     @property
     def base_url(self) -> str:
         """Return the base URL of the server."""
         return self._base_url
-
-    def _headers(self) -> dict[str, str]:
-        """Return the request headers."""
-        headers = {"Content-Type": "application/json"}
-        if self._api_key:
-            headers["Authorization"] = f"Bearer {self._api_key}"
-        return headers
 
     async def _request(
         self,
@@ -132,15 +115,10 @@ class LlamaCppClient:
             async with self._session.request(
                 method,
                 url,
-                headers=self._headers(),
                 json=json,
                 timeout=aiohttp.ClientTimeout(total=timeout),
             ) as response:
                 body = await response.text()
-                if response.status in (401, 403):
-                    raise LlamaCppAuthError(
-                        "The llama.cpp server rejected the API key"
-                    )
                 if response.status >= 400:
                     raise LlamaCppResponseError(
                         _error_message(body, response.status, url)

@@ -9,7 +9,6 @@ import pytest
 from aiohttp import web
 
 from custom_components.llama_cpp_ai_task.client import (
-    LlamaCppAuthError,
     LlamaCppClient,
     LlamaCppConnectionError,
     LlamaCppResponseError,
@@ -52,14 +51,16 @@ async def test_client_http_round_trip() -> None:
     last_body: dict = {}
 
     async def props(request: web.Request) -> web.Response:
-        if require_key and request.headers.get("Authorization") != "Bearer secret":
-            return web.json_response({"error": {"message": "Invalid API Key"}}, status=401)
+        if require_key:
+            return web.json_response({"error": {"message": "Unauthorized"}}, status=401)
+        assert "Authorization" not in request.headers
         return web.json_response(PROPS)
 
     async def models(_request: web.Request) -> web.Response:
         return web.json_response({"data": [{"id": "unsloth/Qwen3-8B-GGUF"}]})
 
     async def chat(request: web.Request) -> web.Response:
+        assert "Authorization" not in request.headers
         body = await request.json()
         last_body.clear()
         last_body.update(body)
@@ -112,9 +113,7 @@ async def test_client_http_round_trip() -> None:
                 await bad.async_get_server_info()
 
             require_key = True
-            with pytest.raises(LlamaCppAuthError):
+            with pytest.raises(LlamaCppResponseError, match="Unauthorized"):
                 await client.async_get_server_info()
-            authed = LlamaCppClient(session, base_url, "secret")
-            assert (await authed.async_get_server_info()).build_info == "b8681"
     finally:
         await runner.cleanup()

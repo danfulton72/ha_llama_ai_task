@@ -1,4 +1,4 @@
-"""Constants for the llama.cpp integration."""
+"""Constants for the llama.cpp AI Task integration."""
 
 from __future__ import annotations
 
@@ -8,9 +8,7 @@ from typing import Final
 DOMAIN: Final = "llama_cpp_ai_task"
 LOGGER: Final = logging.getLogger(__package__)
 
-MANUFACTURER: Final = "llama.cpp"
-
-# Subentry types. Each subentry becomes one entity + one service device.
+# Subentry types. Each subentry becomes one standalone AI Task entity.
 AI_TASK_SUBENTRY_TYPE: Final = "ai_task_data"
 
 DEFAULT_URL: Final = "http://localhost:8080"
