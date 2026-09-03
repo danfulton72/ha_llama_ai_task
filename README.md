@@ -11,14 +11,15 @@ A HACS-installable custom integration that exposes a local `llama.cpp` (`llama-s
 - Image and audio attachments when `llama-server` supports them.
 - Per-task model and sampler settings.
 - Prompt-cache reuse with `cache_prompt`.
-- Direct unauthenticated connection to a local llama-server.
+- Direct unauthenticated connection to a local llama-server or llama-swap instance.
+- Automatic llama-swap model routing: the integration prefers an already-loaded model for server introspection and as the default task model.
 - No cloud service calls from the integration.
 
 ## Requirements
 
 - Home Assistant 2026.8 or newer. Home Assistant 2026.9 replaced `voluptuous-openapi` with `probatio`; the integration detects which converter Core ships and uses it.
 - HACS for HACS installation.
-- A reachable recent `llama-server` build that does not require API-key authentication.
+- A reachable recent `llama-server` build, or a llama-swap instance routing to recent llama-server builds, that does not require API-key authentication.
 
 ## Start llama-server
 
@@ -38,11 +39,19 @@ For vision tasks, start the server with a multimodal projector, for example:
 llama-server -hf ggml-org/gemma-3-4b-it-GGUF --mmproj auto --jinja --host 0.0.0.0
 ```
 
-From the Home Assistant host, a useful connectivity check is:
+From the Home Assistant host, a useful direct llama-server connectivity check is:
 
 ```bash
 curl -s http://YOUR_SERVER:8080/props
 ```
+
+For llama-swap, list its routed models first:
+
+```bash
+curl -s http://YOUR_LLAMA_SWAP:8080/v1/models
+```
+
+llama-swap requires a model when routing llama.cpp-specific endpoints such as `/props`. The integration detects this automatically and prefers a model whose status is `loaded`.
 
 ## Install with HACS
 
@@ -57,13 +66,15 @@ Manual installation is also possible by copying `custom_components/llama_cpp_ai_
 
 ## Configure
 
-Enter the base URL of `llama-server`, for example `http://192.168.1.10:8080`. Do **not** append `/v1`; the integration adds the endpoint paths itself. The server must be reachable without API-key authentication.
+Enter the server URL, for example `http://192.168.1.10:8080`. Both the server-root form and an OpenAI-compatible URL ending in `/v1` are accepted; the integration normalizes `/v1` back to the server root before using llama.cpp-specific endpoints. The server must be reachable without API-key authentication.
+
+For plain llama-server, setup reads `/props` directly. For llama-swap, if bare `/props` cannot be routed, setup reads `/v1/models`, prefers an already-loaded model, and retries `/props?model=<id>`. That same model becomes the default routing model for AI Tasks unless a task explicitly selects another model.
 
 An AI Task entity is created automatically. Additional task entities can be added as subentries, each with its own options. AI Task entities are standalone Home Assistant entities and are not represented as llama.cpp conversation/service devices.
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| Model | empty | Only needed when the server exposes more than one model. |
+| Model | automatic/empty | On llama-swap the detected routed model is used automatically; choose another model per task if required. Plain llama-server usually does not need this field. |
 | Extra instructions | empty | Added to the system prompt for each request. Rendered as a Home Assistant template. |
 | Maximum tokens | 1024 | Raise for larger structured responses. |
 | Temperature | 0.4 | Lower values are usually better for deterministic data tasks. |
@@ -124,7 +135,8 @@ Hybrid reasoning models are asked not to think by default using `chat_template_k
 
 - This integration does not implement Home Assistant LLM tool calling.
 - It does not provide a conversation agent; Home Assistant Core's `llama.cpp` integration already covers that use case.
-- API-key-authenticated llama-server instances are not supported.
+- API-key-authenticated llama-server/llama-swap instances are not supported.
+- On llama-swap, server-level capability information is taken from the automatically selected routed model. A task that explicitly chooses a different model may have different multimodal capabilities.
 - Attachments must resolve to local files and are inlined into the request.
 - Structured output is requested as `response_format.json_schema.schema`, which needs a llama.cpp build recent enough to read that field.
 - llama.cpp has had releases where structured-output constraints could fail open. This integration therefore validates the final data again in Home Assistant and fails the task if the structure does not match.
@@ -134,7 +146,8 @@ Hybrid reasoning models are asked not to think by default using `chat_template_k
 
 | Symptom | Likely cause |
 | --- | --- |
-| Failed to connect during setup | `llama-server` is not reachable from Home Assistant, is bound only to loopback, requires authentication, or a firewall is blocking it. |
+| Failed to connect during setup | `llama-server`/llama-swap is not reachable from Home Assistant, is bound only to loopback, requires authentication, or a firewall is blocking it. |
+| llama-swap reports `no model id could be identified` | Update to a release of this integration with llama-swap routing support. Setup will query `/v1/models` and retry `/props` with a model ID automatically. |
 | Config entry not ready after restart | The server/model is still starting; Home Assistant retries. |
 | Structured task fails validation | The model/server ignored or could not enforce the response schema. Try a newer llama.cpp build and keep thinking disabled. |
 | Task stops at token limit | Increase **Maximum tokens** or reduce the requested output. |

@@ -58,17 +58,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: LlamaCppConfigEntry) -> 
     )
 
     try:
-        info = await client.async_get_server_info()
+        info = await client.async_detect_server_info()
     except LlamaCppError as err:
         # The server may simply still be loading the model.
         raise ConfigEntryNotReady(str(err)) from err
 
     LOGGER.debug(
-        "Connected to llama.cpp %s serving %s (n_ctx=%s, modalities=%s)",
+        "Connected to llama.cpp %s serving %s (n_ctx=%s, modalities=%s, routed_model=%s)",
         info.build_info,
         info.model_name,
         info.n_ctx,
         info.modalities,
+        client.default_model,
     )
 
     entry.runtime_data = LlamaCppRuntimeData(client=client, info=info)
