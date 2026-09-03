@@ -1,4 +1,6 @@
 {
   "name": "llama.cpp AI Task",
-  "homeassistant": "2025.7.0"
+  "homeassistant": "2026.8.0",
+  "zip_release": true,
+  "filename": "llama_cpp_ai_task.zip"
 }

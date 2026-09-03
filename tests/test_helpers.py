@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 import voluptuous as vol
 from homeassistant.exceptions import HomeAssistantError
@@ -11,6 +13,7 @@ from custom_components.llama_cpp_ai_task.helpers import (
     _extract_text,
     _isolate_json,
     _to_json_schema,
+    attachments_supported,
     strip_thinking,
 )
 
@@ -92,3 +95,44 @@ def test_schema_conversion_and_cleaning() -> None:
     assert "nullable" not in cleaned["properties"]["a"]
     assert "enum" not in cleaned["properties"]["b"]
     assert "type" not in cleaned["properties"]["c"]
+
+
+def test_schema_conversion_is_openapi_31_and_preserves_nullability() -> None:
+    """Nullability must survive 3.1 conversion instead of being discarded."""
+    converted = _to_json_schema(
+        vol.Schema({vol.Optional("note"): vol.Any(str, None)})
+    )
+    note_schema = converted["properties"]["note"]
+    assert "nullable" not in json.dumps(note_schema)
+
+    def contains_null_type(value: object) -> bool:
+        if isinstance(value, dict):
+            schema_type = value.get("type")
+            if schema_type == "null" or (
+                isinstance(schema_type, list) and "null" in schema_type
+            ):
+                return True
+            return any(contains_null_type(item) for item in value.values())
+        if isinstance(value, list):
+            return any(contains_null_type(item) for item in value)
+        return False
+
+    assert contains_null_type(note_schema), note_schema
+
+
+@pytest.mark.parametrize(
+    ("forced", "vision", "audio", "expected"),
+    [
+        (False, False, False, False),
+        (False, True, False, True),
+        (False, False, True, True),
+        (True, False, False, True),
+        (True, True, True, True),
+    ],
+)
+def test_attachments_supported(
+    forced: bool, vision: bool, audio: bool, expected: bool
+) -> None:
+    assert (
+        attachments_supported(forced=forced, vision=vision, audio=audio) is expected
+    )

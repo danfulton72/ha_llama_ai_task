@@ -106,10 +106,10 @@ class LlamaCppConfigFlow(ConfigFlow, domain=DOMAIN):
                         ConfigSubentryData(
                             subentry_type=AI_TASK_SUBENTRY_TYPE,
                             title=DEFAULT_AI_TASK_NAME,
-                            data={
-                                CONF_ATTACHMENTS: info.supports_vision
-                                or info.supports_audio
-                            },
+                            # Attachment support is derived from the modalities
+                            # the server reports on every setup, so nothing is
+                            # frozen into the subentry here.
+                            data={},
                             unique_id=None,
                         )
                     ],
@@ -132,6 +132,10 @@ class LlamaCppConfigFlow(ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             url = user_input[CONF_URL].rstrip("/")
+            for other in self._async_current_entries():
+                if other.entry_id != entry.entry_id and other.data.get(CONF_URL) == url:
+                    return self.async_abort(reason="already_configured")
+
             _, error = await self._async_try_connect(
                 url, user_input.get(CONF_API_KEY)
             )
@@ -205,7 +209,7 @@ class LlamaCppConfigFlow(ConfigFlow, domain=DOMAIN):
         except LlamaCppError as err:
             LOGGER.debug("Unexpected response from %s: %s", url, err)
             return None, "invalid_server"
-        except Exception:  # noqa: BLE001
+        except Exception:
             LOGGER.exception("Unexpected error connecting to %s", url)
             return None, "unknown"
 
@@ -254,10 +258,8 @@ class LlamaCppSubentryFlowHandler(ConfigSubentryFlow):
         models = await runtime.client.async_list_models() if runtime else []
 
         if is_new:
-            defaults: dict[str, Any] = {
-                CONF_NAME: DEFAULT_AI_TASK_NAME,
-                CONF_ATTACHMENTS: info.supports_vision or info.supports_audio,
-            }
+            # CONF_ATTACHMENTS is a force-on override, not the detected value.
+            defaults: dict[str, Any] = {CONF_NAME: DEFAULT_AI_TASK_NAME}
         else:
             subentry = self._get_reconfigure_subentry()
             defaults = {CONF_NAME: subentry.title, **subentry.data}

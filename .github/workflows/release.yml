@@ -30,12 +30,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout main
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Set up Python 3.14
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.14"
           cache: pip
@@ -168,12 +168,12 @@ jobs:
       - name: Build release archive
         if: steps.version.outputs.skip != 'true'
         shell: bash
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
         run: |
+          # hacs.json sets `zip_release` with this exact filename, so the asset
+          # name is constant and the archive holds integration files at its root.
           mkdir -p dist
-          zip -qr "dist/llama_cpp_ai_task-${VERSION}.zip" custom_components/llama_cpp_ai_task
-          sha256sum "dist/llama_cpp_ai_task-${VERSION}.zip" > "dist/llama_cpp_ai_task-${VERSION}.zip.sha256"
+          (cd custom_components/llama_cpp_ai_task && zip -qr "${GITHUB_WORKSPACE}/dist/llama_cpp_ai_task.zip" .)
+          (cd dist && sha256sum llama_cpp_ai_task.zip > llama_cpp_ai_task.zip.sha256)
 
       - name: Publish GitHub Release
         if: steps.version.outputs.skip != 'true'
@@ -181,7 +181,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.version.outputs.tag }}
-          VERSION: ${{ steps.version.outputs.version }}
           PRERELEASE: ${{ inputs.prerelease }}
         run: |
           EXTRA=()
@@ -194,8 +193,8 @@ jobs:
             --title "${TAG}" \
             --generate-notes \
             "${EXTRA[@]}" \
-            "dist/llama_cpp_ai_task-${VERSION}.zip" \
-            "dist/llama_cpp_ai_task-${VERSION}.zip.sha256"
+            dist/llama_cpp_ai_task.zip \
+            dist/llama_cpp_ai_task.zip.sha256
 
       - name: Verify published release consistency
         if: steps.version.outputs.skip != 'true'

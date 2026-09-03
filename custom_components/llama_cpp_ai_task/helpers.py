@@ -3,13 +3,24 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Final
 
-from probatio import to_openapi
 import voluptuous as vol
 
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import llm
+
+try:
+    # Home Assistant 2026.9 replaced voluptuous/voluptuous-openapi with probatio
+    # as its validation engine. `probatio` is a Core dependency there, so it must
+    # not be declared in the manifest requirements.
+    from probatio import to_openapi as _convert_schema
+except ImportError:  # pragma: no cover - exercised by the HA 2026.8 CI job
+    from voluptuous_openapi import convert as _convert_schema
+
+# OpenAPI 3.1 preserves nullability as a JSON-schema-compatible null branch,
+# which llama.cpp's json-schema-to-grammar converter understands.
+OPENAPI_VERSION: Final = "3.1.0"
 
 # Some chat templates emit reasoning inside the content when the server runs
 # with `--reasoning-format none`. Strip it before parsing structured output.
@@ -23,7 +34,11 @@ UNCLOSED_THINK_BLOCK = re.compile(
 
 def _to_json_schema(structure: vol.Schema) -> dict[str, Any]:
     """Convert a Home Assistant selector schema into JSON schema."""
-    schema = to_openapi(structure, custom_serializer=llm.selector_serializer)
+    schema = _convert_schema(
+        structure,
+        custom_serializer=llm.selector_serializer,
+        openapi_version=OPENAPI_VERSION,
+    )
 
     if not isinstance(schema, dict):
         raise HomeAssistantError("Unsupported structure for llama.cpp")
@@ -41,8 +56,10 @@ def _clean_schema(schema: Any) -> Any:
         cleaned = {
             key: _clean_schema(value)
             for key, value in schema.items()
-            # `default` and `nullable` have no grammar equivalent, and an empty
-            # `enum` would compile to a grammar that matches nothing.
+            # `default` has no grammar equivalent, and an empty `enum` would
+            # compile to a grammar that matches nothing. `nullable` should not
+            # survive the 3.1 conversion, but a custom serializer can still emit
+            # it, so it is dropped defensively.
             if key not in ("default", "nullable")
             and not (key == "enum" and not value)
         }
@@ -53,6 +70,16 @@ def _clean_schema(schema: Any) -> Any:
     if isinstance(schema, list):
         return [_clean_schema(item) for item in schema]
     return schema
+
+
+def attachments_supported(*, forced: bool, vision: bool, audio: bool) -> bool:
+    """Return whether attachment support should be advertised.
+
+    Support is derived from the modalities the server reports at setup, so
+    restarting llama-server with a projector and reloading the entry is enough.
+    ``forced`` is an override for builds that do not report their modalities.
+    """
+    return bool(forced or vision or audio)
 
 
 def _isolate_json(text: str) -> str:
