@@ -13,7 +13,8 @@ from typing import TYPE_CHECKING, Any
 
 from homeassistant.components import conversation
 from homeassistant.config_entries import ConfigSubentry
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import HomeAssistantError, TemplateError
+from homeassistant.helpers import template
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity import Entity
 
@@ -120,17 +121,14 @@ class LlamaCppBaseLLMEntity(Entity):
             payload["chat_template_kwargs"] = {"enable_thinking": False}
 
         if json_schema is not None:
-            # Sent in three shapes on purpose: llama.cpp releases have read the
-            # schema from `response_format.schema` and from
-            # `response_format.json_schema.schema`, and other OpenAI-compatible
-            # servers behind a proxy expect the nested form. Extra keys are
-            # ignored, so this works across builds.
+            # Current llama.cpp reads the OpenAI-compatible nested schema shape.
+            # Do not send OpenAI's `strict` flag: the schemas Home Assistant
+            # produces do not guarantee strict-mode requirements such as every
+            # property being required and `additionalProperties: false`.
             payload["response_format"] = {
                 "type": "json_schema",
-                "schema": json_schema,
                 "json_schema": {
                     "name": "structured_output",
-                    "strict": True,
                     "schema": json_schema,
                 },
             }
@@ -166,8 +164,8 @@ class LlamaCppBaseLLMEntity(Entity):
         system_parts: list[str] = []
         messages: list[dict[str, Any]] = []
 
-        if extra_prompt := self.options.get(CONF_PROMPT):
-            system_parts.append(str(extra_prompt).strip())
+        if extra_prompt := self._render_extra_prompt():
+            system_parts.append(extra_prompt)
 
         for content in chat_log.content:
             if isinstance(content, conversation.SystemContent):
@@ -190,6 +188,22 @@ class LlamaCppBaseLLMEntity(Entity):
             )
 
         return messages
+
+    def _render_extra_prompt(self) -> str | None:
+        """Render the configured extra instructions as a template."""
+        raw_prompt = self.options.get(CONF_PROMPT)
+        if not raw_prompt:
+            return None
+        try:
+            rendered = template.Template(str(raw_prompt), self.hass).async_render(
+                {"ha_name": self.hass.config.location_name},
+                parse_result=False,
+            )
+        except TemplateError as err:
+            raise HomeAssistantError(
+                f"Error rendering the extra instructions template: {err}"
+            ) from err
+        return rendered.strip() or None
 
     async def _async_user_message(
         self, content: conversation.UserContent
@@ -236,6 +250,11 @@ class LlamaCppBaseLLMEntity(Entity):
             }
 
         if mime_type.startswith("audio/"):
+            if not self.server_info.supports_audio:
+                LOGGER.warning(
+                    "Sending audio to a llama.cpp server that does not report "
+                    "audio support; start llama-server with --mmproj"
+                )
             # llama.cpp accepts wav and mp3 for audio input.
             audio_format = mime_type.rsplit("/", 1)[-1].lower()
             if audio_format in ("mpeg", "mpga", "mp3"):
