@@ -1,0 +1,17 @@
+{
+  "domain": "llama_cpp_ai_task",
+  "name": "llama.cpp AI Task",
+  "codeowners": [
+    "@danfulton72"
+  ],
+  "config_flow": true,
+  "dependencies": [
+    "ai_task"
+  ],
+  "documentation": "https://github.com/danfulton72/ha_llama_ai_task",
+  "integration_type": "service",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/danfulton72/ha_llama_ai_task/issues",
+  "requirements": [],
+  "version": "1.0.0"
+}
