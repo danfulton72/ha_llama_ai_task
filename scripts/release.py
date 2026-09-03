@@ -3,7 +3,7 @@
 
 The published GitHub Release is the canonical released version. This helper
 keeps the Home Assistant manifest mechanically synchronized with the release
-version requested by the release workflow.
+version requested or derived by the release workflow.
 """
 
 from __future__ import annotations
@@ -27,6 +27,12 @@ def normalize_version(value: str) -> str:
     if not SEMVER_RE.fullmatch(version):
         raise ValueError(f"Invalid release version {value!r}; expected X.Y.Z")
     return version
+
+
+def next_patch_version(value: str) -> str:
+    """Return the next patch version for a strict semantic version."""
+    major, minor, patch = map(int, normalize_version(value).split("."))
+    return f"{major}.{minor}.{patch + 1}"
 
 
 def manifest_version() -> str:
@@ -67,6 +73,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("get")
+    subparsers.add_parser("next-patch")
     set_parser = subparsers.add_parser("set")
     set_parser.add_argument("version")
     check_parser = subparsers.add_parser("check-tag")
@@ -82,6 +89,8 @@ def main() -> int:
     try:
         if args.command == "get":
             print(manifest_version())
+        elif args.command == "next-patch":
+            print(next_patch_version(manifest_version()))
         elif args.command == "set":
             print(set_manifest_version(args.version))
         elif args.command == "check-tag":
