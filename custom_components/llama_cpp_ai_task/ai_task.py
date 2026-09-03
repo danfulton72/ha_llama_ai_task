@@ -3,20 +3,18 @@
 from __future__ import annotations
 
 import json
-from typing import Any
 
-from probatio import to_openapi
 import voluptuous as vol
 
 from homeassistant.components import ai_task, conversation
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import llm
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import LlamaCppConfigEntry
 from .const import AI_TASK_SUBENTRY_TYPE, CONF_ATTACHMENTS, LOGGER
 from .entity import LlamaCppBaseLLMEntity
+from .helpers import _isolate_json, _to_json_schema
 
 
 async def async_setup_entry(
@@ -87,66 +85,3 @@ class LlamaCppTaskEntity(ai_task.AITaskEntity, LlamaCppBaseLLMEntity):
             conversation_id=chat_log.conversation_id,
             data=data,
         )
-
-
-def _to_json_schema(structure: vol.Schema) -> dict[str, Any]:
-    """Convert a Home Assistant selector schema into JSON schema.
-
-    llama.cpp compiles the schema into a GBNF grammar, so the output is
-    guaranteed to match rather than merely requested.
-    """
-    schema = to_openapi(structure, custom_serializer=llm.selector_serializer)
-
-    if not isinstance(schema, dict):
-        raise HomeAssistantError("Unsupported structure for llama.cpp")
-
-    # llama.cpp's converter needs an explicit type on the root object.
-    if "type" not in schema and "properties" in schema:
-        schema["type"] = "object"
-
-    return _clean_schema(schema)
-
-
-def _clean_schema(schema: Any) -> Any:
-    """Drop keys llama.cpp's json-schema-to-grammar converter chokes on."""
-    if isinstance(schema, dict):
-        cleaned = {
-            key: _clean_schema(value)
-            for key, value in schema.items()
-            # `default` and `nullable` have no grammar equivalent, and an empty
-            # `enum` would compile to a grammar that matches nothing.
-            if key not in ("default", "nullable")
-            and not (key == "enum" and not value)
-        }
-        if cleaned.get("type") == "object" and "properties" not in cleaned:
-            # An object with no properties would constrain output to `{}`.
-            cleaned.pop("type", None)
-        return cleaned
-    if isinstance(schema, list):
-        return [_clean_schema(item) for item in schema]
-    return schema
-
-
-def _isolate_json(text: str) -> str:
-    """Return the JSON document inside ``text``.
-
-    Constrained decoding normally makes this a no-op, but a server that ignored
-    the schema (or a proxy that dropped it) may wrap the answer in prose or a
-    markdown fence.
-    """
-    text = text.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[-1]
-        text = text.rsplit("```", 1)[0]
-        text = text.strip()
-    if text.startswith(("{", "[")):
-        return text
-
-    starts = [index for index in (text.find("{"), text.find("[")) if index != -1]
-    if not starts:
-        return text
-    start = min(starts)
-    end = max(text.rfind("}"), text.rfind("]"))
-    if end > start:
-        return text[start : end + 1]
-    return text
