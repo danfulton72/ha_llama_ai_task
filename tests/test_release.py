@@ -38,6 +38,11 @@ def test_normalize_version_rejects_invalid(value: str) -> None:
         release.normalize_version(value)
 
 
+def test_next_patch_version() -> None:
+    assert release.next_patch_version("1.0.0") == "1.0.1"
+    assert release.next_patch_version("v2.7.99") == "2.7.100"
+
+
 def test_manifest_version_is_semver() -> None:
     current = release.manifest_version()
     assert release.normalize_version(current) == current
