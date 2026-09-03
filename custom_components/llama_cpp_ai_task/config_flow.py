@@ -93,15 +93,15 @@ class LlamaCppConfigFlow(ConfigFlow, domain=DOMAIN):
                 errors["base"] = error
             else:
                 assert info is not None
-                subentry_model = model or info.model_name
-                subentry_data = {CONF_MODEL: subentry_model} if subentry_model else {}
+                title_model = model or info.model_name or "llama.cpp"
+                subentry_data = {CONF_MODEL: model} if model else {}
                 return self.async_create_entry(
                     title=info.model_name or "llama.cpp",
                     data={CONF_URL: url},
                     subentries=[
                         ConfigSubentryData(
                             subentry_type=AI_TASK_SUBENTRY_TYPE,
-                            title=model_name_to_title(subentry_model or "llama.cpp"),
+                            title=model_name_to_title(title_model),
                             # Attachment support is derived from the modalities
                             # the server reports on every setup, so nothing is
                             # frozen into the subentry here.
@@ -153,7 +153,7 @@ class LlamaCppConfigFlow(ConfigFlow, domain=DOMAIN):
     async def _async_try_connect(
         self, url: str
     ) -> tuple[LlamaCppServerInfo | None, str | None, str | None]:
-        """Try to reach the server and identify its preferred model."""
+        """Try to reach the server and identify a request-safe model ID."""
         client = LlamaCppClient(async_get_clientsession(self.hass), url)
         try:
             info = await client.async_detect_server_info()
@@ -167,7 +167,10 @@ class LlamaCppConfigFlow(ConfigFlow, domain=DOMAIN):
             LOGGER.exception("Unexpected error connecting to %s", url)
             return None, None, "unknown"
 
-        model = client.default_model or (models[0] if models else info.model_name)
+        # Only persist a model proven by /v1/models (or llama-swap routing).
+        # /props model_alias/model_path is useful for naming but is not guaranteed
+        # to be a valid OpenAI request model ID.
+        model = client.default_model or (models[0] if models else None)
         return info, model, None
 
     @classmethod
@@ -205,14 +208,13 @@ class LlamaCppSubentryFlowHandler(ConfigSubentryFlow):
         runtime = getattr(entry, "runtime_data", None)
         info = runtime.info if runtime else LlamaCppServerInfo()
         models = await runtime.client.async_list_models() if runtime else []
-        detected_model = runtime.client.default_model if runtime else None
-        if not detected_model and models:
-            detected_model = models[0]
-        if not detected_model:
-            detected_model = info.model_name
+        request_model = runtime.client.default_model if runtime else None
+        if not request_model and models:
+            request_model = models[0]
+        title_model = request_model or info.model_name or "llama.cpp"
 
         if user_input is not None:
-            model = user_input.get(CONF_MODEL) or detected_model or "llama.cpp"
+            model = user_input.get(CONF_MODEL) or title_model
             title = model_name_to_title(str(model))
             if is_new:
                 return self.async_create_entry(title=title, data=user_input)
@@ -226,13 +228,13 @@ class LlamaCppSubentryFlowHandler(ConfigSubentryFlow):
         if is_new:
             # CONF_ATTACHMENTS is a force-on override, not the detected value.
             defaults: dict[str, Any] = {}
-            if detected_model:
-                defaults[CONF_MODEL] = detected_model
+            if request_model:
+                defaults[CONF_MODEL] = request_model
         else:
             subentry = self._get_reconfigure_subentry()
             defaults = dict(subentry.data)
-            if CONF_MODEL not in defaults and detected_model:
-                defaults[CONF_MODEL] = detected_model
+            if CONF_MODEL not in defaults and request_model:
+                defaults[CONF_MODEL] = request_model
 
         return self.async_show_form(
             step_id="set_options",
@@ -280,8 +282,7 @@ def _options_schema(models: list[str]) -> vol.Schema:
             ): NumberSelector(NumberSelectorConfig(min=1, max=2, step=0.01)),
             vol.Required(CONF_TIMEOUT, default=DEFAULT_TIMEOUT): NumberSelector(
                 NumberSelectorConfig(
-                    min=10, max=900, step=5, mode=NumberSelectorMode.BOX
-                )
+                    min=10, max=900, step=5, mode=NumberSelectorMode.BOX)
             ),
             vol.Required(CONF_THINKING, default=DEFAULT_THINKING): BooleanSelector(),
             vol.Required(CONF_ATTACHMENTS, default=False): BooleanSelector(),
