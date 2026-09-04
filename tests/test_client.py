@@ -81,6 +81,7 @@ def test_preferred_model_requires_a_strong_signal() -> None:
 async def test_client_http_round_trip_and_router_discovery() -> None:
     state: dict[str, object] = {
         "router": False,
+        "native_router": False,
         "records": [{"id": "unsloth/Qwen3-8B-GGUF"}],
         "routed_props": [],
     }
@@ -88,6 +89,15 @@ async def test_client_http_round_trip_and_router_discovery() -> None:
 
     async def props(request: web.Request) -> web.Response:
         model = request.query.get("model")
+        if state["native_router"] and not model:
+            return web.json_response(
+                {
+                    "role": "router",
+                    "build_info": "b-router",
+                    "max_instances": 2,
+                    "models_autoload": False,
+                }
+            )
         if state["router"] and not model:
             return web.json_response(
                 {"error": {"message": "model is required"}}, status=404
@@ -165,8 +175,28 @@ async def test_client_http_round_trip_and_router_discovery() -> None:
             assert v1_client.base_url == base_url
             assert (await v1_client.async_detect_server_info()).build_info == "b8681"
 
+            # Native llama.cpp router mode returns router-level /props successfully.
+            # Discovery should then enrich it from an already-loaded model instead
+            # of silently losing n_ctx/modalities at the router boundary.
+            state["native_router"] = True
+            state["records"] = [
+                {
+                    "id": "native-loaded",
+                    "owned_by": "llamacpp",
+                    "status": {"value": "loaded"},
+                }
+            ]
+            state["routed_props"] = []
+            native = LlamaCppClient(session, base_url)
+            native_info = await native.async_detect_server_info()
+            assert native_info.n_ctx == 32768
+            assert native_info.supports_vision is True
+            assert native.default_model == "native-loaded"
+            assert state["routed_props"] == [("native-loaded", "false")]
+
             # Generic router records deliberately do not contain llama-swap
             # markers. A successful model-specific /props probe proves llama.cpp.
+            state["native_router"] = False
             state["router"] = True
             state["records"] = [
                 {
@@ -185,6 +215,7 @@ async def test_client_http_round_trip_and_router_discovery() -> None:
                     "status": {"value": "unloaded"},
                 },
             ]
+            state["routed_props"] = []
             routed = LlamaCppClient(session, base_url)
             router_info = await routed.async_detect_server_info()
             assert router_info.n_ctx == 32768
