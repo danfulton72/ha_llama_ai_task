@@ -217,7 +217,7 @@ class LlamaCppConfigFlow(ConfigFlow, domain=DOMAIN):
         client = LlamaCppClient(async_get_clientsession(self.hass), url, api_key)
         try:
             info = await client.async_detect_server_info()
-            models = await client.async_list_models()
+            await client.async_list_models()
         except LlamaCppAuthError:
             return None, None, "invalid_auth"
         except LlamaCppConnectionError:
@@ -268,7 +268,6 @@ class LlamaCppSubentryFlowHandler(ConfigSubentryFlow):
         info = runtime.info if runtime else LlamaCppServerInfo()
         models = await runtime.client.async_list_models() if runtime else []
         request_model = runtime.client.default_model if runtime else None
-        title_model = request_model or info.model_name or "llama.cpp"
 
         if user_input is not None:
             selected_model = user_input.get(CONF_MODEL) or request_model
