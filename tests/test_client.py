@@ -8,6 +8,7 @@ import aiohttp
 import pytest
 from aiohttp import web
 
+from custom_components.llama_cpp_ai_task import client as client_module
 from custom_components.llama_cpp_ai_task.client import (
     LlamaCppAuthError,
     LlamaCppClient,
@@ -15,9 +16,24 @@ from custom_components.llama_cpp_ai_task.client import (
     LlamaCppResponseError,
     LlamaCppServerInfo,
     _error_message,
+    _is_routing_refusal,
     _preferred_model_id,
+    _probe_candidates,
     normalize_base_url,
 )
+
+# What llama.cpp router mode actually answers to a bare /props. The model_alias
+# and model_path values are placeholders so web UIs do not break; they name no
+# model. See tools/server/server-models.cpp, get_router_props.
+ROUTER_PROPS = {
+    "role": "router",
+    "model_alias": "llama-server",
+    "model_path": "none",
+    "build_info": "b-router",
+    "max_instances": 2,
+    "models_autoload": False,
+    "default_generation_settings": {"params": {}, "n_ctx": 0},
+}
 
 PROPS = {
     "model_alias": "unsloth/Qwen3-8B-GGUF",
@@ -37,6 +53,71 @@ def test_server_info() -> None:
 
     path_info = LlamaCppServerInfo({"model_path": "/models/model-Q4.gguf"})
     assert path_info.model_name == "model-Q4.gguf"
+
+
+def test_router_props_placeholders_are_not_a_model() -> None:
+    """Router placeholders must never become an entry or AI Task name."""
+    router = LlamaCppServerInfo(ROUTER_PROPS)
+    assert router.is_router is True
+    assert router.model_name is None
+    assert router.n_ctx is None
+    assert router.build_info == "b-router"
+    assert router.supports_vision is False
+
+    assert LlamaCppServerInfo(PROPS).is_router is False
+
+
+def test_routing_refusal_is_matched_on_the_body_only() -> None:
+    """A hostname must not be able to vouch for the software behind it."""
+    assert _is_routing_refusal(None) is False
+    assert (
+        _is_routing_refusal(
+            LlamaCppResponseError(
+                "boom", body='{"error":{"message":"model is not loaded"}}'
+            )
+        )
+        is True
+    )
+    assert (
+        _is_routing_refusal(
+            LlamaCppResponseError(
+                "boom", body='{"error":{"message":"model name is missing from the request"}}'
+            )
+        )
+        is True
+    )
+    # The formatted message carries the URL; only the body may be evidence.
+    assert (
+        _is_routing_refusal(
+            LlamaCppResponseError(
+                _error_message('{"detail":"Not Found"}', 404, "http://llama-swap.lan/props"),
+                body='{"detail":"Not Found"}',
+            )
+        )
+        is False
+    )
+
+
+def test_probe_candidates_never_walk_unloaded_models() -> None:
+    """Only loaded models, or a sole model, may be inspected during setup."""
+    assert _probe_candidates([]) == []
+    assert _probe_candidates([{"id": "only", "status": {"value": "unloaded"}}]) == [
+        "only"
+    ]
+    assert _probe_candidates(
+        [
+            {"id": "a", "status": {"value": "unloaded"}},
+            {"id": "b", "status": {"value": "unloaded"}},
+        ]
+    ) == []
+    assert _probe_candidates(
+        [
+            {"id": "a", "status": {"value": "unloaded"}},
+            {"id": "b", "status": {"value": "loaded"}},
+            {"id": "c", "status": {"value": "loaded"}},
+            {"id": "d", "status": {"value": "loaded"}},
+        ]
+    ) == ["b", "c"]
 
 
 def test_normalize_base_url() -> None:
@@ -90,14 +171,7 @@ async def test_client_http_round_trip_and_router_discovery() -> None:
     async def props(request: web.Request) -> web.Response:
         model = request.query.get("model")
         if state["native_router"] and not model:
-            return web.json_response(
-                {
-                    "role": "router",
-                    "build_info": "b-router",
-                    "max_instances": 2,
-                    "models_autoload": False,
-                }
-            )
+            return web.json_response(ROUTER_PROPS)
         if state["router"] and not model:
             return web.json_response(
                 {"error": {"message": "model is required"}}, status=404
@@ -228,6 +302,21 @@ async def test_client_http_round_trip_and_router_discovery() -> None:
             assert last_body["model"] == "qwen3.5-4b"
             assert "model" not in payload
 
+            # Refreshing must not downgrade a probe-verified default to whichever
+            # model the catalogue happens to list as loaded first.
+            state["records"] = [
+                {"id": "other", "status": {"value": "loaded"}},
+                {"id": "qwen3.5-4b", "status": {"value": "unloaded"}},
+            ]
+            assert await routed.async_refresh_models() == ["other", "qwen3.5-4b"]
+            assert routed.default_model == "qwen3.5-4b"
+
+            # Once the verified model disappears from the catalogue the client
+            # falls back to the ordinary loaded/sole-model signal.
+            state["records"] = [{"id": "other", "status": {"value": "loaded"}}]
+            assert await routed.async_refresh_models() == ["other"]
+            assert routed.default_model == "other"
+
             # With several unloaded models, a recognizable router /props error is
             # enough to identify the router, but discovery must not cold-start any.
             state["records"] = [
@@ -314,5 +403,43 @@ async def test_optional_api_key_is_sent_and_auth_errors_are_distinct() -> None:
             assert (await with_key.async_get_server_info()).build_info == "b8681"
 
         assert seen_headers == [None, "Bearer secret"]
+    finally:
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_routed_probe_timeout_is_a_connection_error(monkeypatch) -> None:
+    """A slow cold start is a connection problem, not an invalid server."""
+
+    async def props(request: web.Request) -> web.Response:
+        if not request.query.get("model"):
+            # llama-swap's wording when /props is called without a model.
+            return web.json_response(
+                {"src": "llama-swap", "error": {"message": "no model id could be identified"}},
+                status=400,
+            )
+        # llama-swap ignores autoload=false, so the sole model cold-starts here.
+        await asyncio.sleep(0.5)
+        return web.json_response(PROPS)
+
+    async def models(_request: web.Request) -> web.Response:
+        return web.json_response({"data": [{"id": "only"}]})
+
+    app = web.Application()
+    app.router.add_get("/props", props)
+    app.router.add_get("/v1/models", models)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    assert site._server is not None
+    port = site._server.sockets[0].getsockname()[1]
+
+    monkeypatch.setattr(client_module, "ROUTED_PROPS_TIMEOUT", 0.05)
+    try:
+        async with aiohttp.ClientSession() as session:
+            client = LlamaCppClient(session, f"http://127.0.0.1:{port}")
+            with pytest.raises(LlamaCppConnectionError):
+                await client.async_detect_server_info()
     finally:
         await runner.cleanup()
