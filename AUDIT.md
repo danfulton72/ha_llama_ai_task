@@ -96,13 +96,26 @@ For routed servers:
   capabilities can be discovered without creating a multi-model cold-start
   storm;
 - native llama.cpp router-level `/props` is recognized and, when safe, enriched
-  with model-specific `/props` so modalities/context are not silently lost.
+  with model-specific `/props` so modalities/context are not silently lost;
+- router-level `/props` carries placeholder identity fields
+  (`model_alias: "llama-server"`, `model_path: "none"`, `n_ctx: 0`) that exist
+  only so web UIs do not break. `LlamaCppServerInfo.is_router` suppresses them,
+  so a router is never mistaken for a model named **Llama Server**;
+- routing evidence is matched against the `/props` response body only. The
+  formatted error message embeds the request URL, and a host named
+  `llama-swap.lan` must not vouch for whatever answers on it;
+- a routed probe that cannot reach the server raises the connection error. A
+  slow cold start on a router that ignores `autoload=false` is therefore
+  reported and retried as a connection problem, not misreported as an invalid
+  server.
 
 `async_list_models()` is intentionally pure. The stateful operation that may set
 `client.default_model` is `async_refresh_models()`, making calls that establish
 an automatic request default explicit. A default is selected only from a model
 reported loaded or from an unambiguous sole model; the first item in a
-multi-model list is never chosen arbitrarily.
+multi-model list is never chosen arbitrarily. A default that a successful
+`/props` probe verified is kept across refreshes for as long as the server still
+lists it, so refreshing cannot downgrade to a model whose own probe failed.
 
 ### AI Task request behaviour
 
