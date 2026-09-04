@@ -95,6 +95,38 @@ def _reconfigure_schema(*, has_api_key: bool) -> vol.Schema:
     return vol.Schema(fields)
 
 
+def _reconfigure_defaults(entry_data: Mapping[str, Any]) -> dict[str, Any]:
+    """Return browser-safe suggested values for the reconfigure form."""
+    return {CONF_URL: entry_data[CONF_URL]}
+
+
+def _effective_reconfigure_api_key(
+    entry_data: Mapping[str, Any], user_input: Mapping[str, Any]
+) -> str | None:
+    """Return the credential to validate for one reconfigure submission."""
+    replacement = user_input.get(CONF_API_KEY)
+    if replacement:
+        return str(replacement)
+    if user_input.get(CONF_REMOVE_API_KEY):
+        return None
+    stored = entry_data.get(CONF_API_KEY)
+    return str(stored) if stored else None
+
+
+def _updated_reconfigure_data(
+    entry_data: Mapping[str, Any], url: str, user_input: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Update only URL/auth fields while preserving future entry data keys."""
+    data = dict(entry_data)
+    data[CONF_URL] = url
+    replacement = user_input.get(CONF_API_KEY)
+    if replacement:
+        data[CONF_API_KEY] = str(replacement)
+    elif user_input.get(CONF_REMOVE_API_KEY):
+        data.pop(CONF_API_KEY, None)
+    return data
+
+
 class LlamaCppConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle the config flow for llama.cpp AI Task."""
 
@@ -156,32 +188,19 @@ class LlamaCppConfigFlow(ConfigFlow, domain=DOMAIN):
             if self._url_is_configured(url, exclude_entry_id=entry.entry_id):
                 return self.async_abort(reason="already_configured")
 
-            replacement_api_key = user_input.get(CONF_API_KEY) or None
-            remove_api_key = bool(user_input.get(CONF_REMOVE_API_KEY))
-            if replacement_api_key:
-                effective_api_key = replacement_api_key
-            elif remove_api_key:
-                effective_api_key = None
-            else:
-                effective_api_key = stored_api_key
-
+            effective_api_key = _effective_reconfigure_api_key(entry.data, user_input)
             _, _, error = await self._async_try_connect(url, effective_api_key)
             if error:
                 errors["base"] = error
             else:
-                # Preserve any future config-entry data keys. Only the fields this
-                # flow owns are changed, rather than replacing entry.data wholesale.
-                data = dict(entry.data)
-                data[CONF_URL] = url
-                if replacement_api_key:
-                    data[CONF_API_KEY] = replacement_api_key
-                elif remove_api_key:
-                    data.pop(CONF_API_KEY, None)
-                return self.async_update_reload_and_abort(entry, data=data)
+                return self.async_update_reload_and_abort(
+                    entry,
+                    data=_updated_reconfigure_data(entry.data, url, user_input),
+                )
 
         # Never pre-fill a stored secret. Blank means "keep the existing key";
         # removal is an explicit checkbox when a key is currently stored.
-        defaults: dict[str, Any] = {CONF_URL: entry.data[CONF_URL]}
+        defaults = _reconfigure_defaults(entry.data)
         return self.async_show_form(
             step_id="reconfigure",
             data_schema=self.add_suggested_values_to_schema(
