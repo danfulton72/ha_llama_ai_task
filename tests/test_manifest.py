@@ -12,6 +12,14 @@ MANIFEST = INTEGRATION / "manifest.json"
 HACS = ROOT / "hacs.json"
 RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
 RELEASE_VERSION = ROOT / "RELEASE_VERSION"
+VERSION_RE = re.compile(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)")
+
+
+def _version_tuple(version: str) -> tuple[int, int, int]:
+    """Parse the repository's strict X.Y.Z version format."""
+    assert VERSION_RE.fullmatch(version)
+    major, minor, patch = version.split(".")
+    return int(major), int(minor), int(patch)
 
 
 def test_manifest_contract() -> None:
@@ -21,7 +29,7 @@ def test_manifest_contract() -> None:
     assert data["config_flow"] is True
     assert data["dependencies"] == ["ai_task"]
     assert data["integration_type"] == "service"
-    assert re.fullmatch(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", data["version"])
+    _version_tuple(data["version"])
     assert data["documentation"].startswith("https://github.com/danfulton72/")
     assert data["requirements"] == []
     assert (INTEGRATION / "translations" / "en.json").is_file()
@@ -57,11 +65,11 @@ def test_release_workflow_runs_after_successful_main_ci() -> None:
     assert '--expected-tag "${TAG}"' in workflow
 
 
-def test_v1_1_0_one_shot_release_target_contract() -> None:
-    """Allow the target marker before/during release and its removal afterwards."""
+def test_one_shot_release_target_contract() -> None:
+    """Allow a future release marker before/during release without stale bounds."""
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
     workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
-    version = tuple(map(int, manifest["version"].split(".")))
+    manifest_version = _version_tuple(manifest["version"])
 
     assert "elif [[ -f RELEASE_VERSION ]]" in workflow
     assert 'cat RELEASE_VERSION' in workflow
@@ -69,11 +77,9 @@ def test_v1_1_0_one_shot_release_target_contract() -> None:
 
     if RELEASE_VERSION.exists():
         target = RELEASE_VERSION.read_text(encoding="utf-8").strip()
-        assert target == "1.1.0"
-        # Branch CI sees 1.0.4; the release quality gate sees 1.1.0 after the
-        # workflow synchronizes the manifest but before it consumes the marker.
-        assert manifest["version"] in {"1.0.4", target}
-    else:
-        # Once the release commit consumes the marker, the manifest must have
-        # reached at least the requested minor release.
-        assert version >= (1, 1, 0)
+        target_version = _version_tuple(target)
+        # Branch CI sees the currently published manifest version; the release
+        # quality gate sees manifest == target after synchronization but before
+        # the marker is consumed. Both are valid, and an intervening patch release
+        # must not hard-code the branch to a particular previous version.
+        assert manifest_version <= target_version
