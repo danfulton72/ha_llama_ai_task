@@ -53,7 +53,7 @@ For a router, list its models first:
 curl -s http://YOUR_ROUTER:8080/v1/models
 ```
 
-Some routers require a model query parameter for model-specific endpoints such as `/props`. The integration handles this automatically. It probes models reported as already loaded with `autoload=false` where that parameter is supported. If exactly one model exists, it may perform one `autoload=false` capability probe even when the router does not mark it loaded. It never walks a list of unloaded models causing repeated cold starts.
+Some routers require a model query parameter for model-specific endpoints such as `/props`. The integration handles this automatically. It probes models reported as already loaded with `autoload=false` where that parameter is supported. If exactly one model exists, it may perform one `autoload=false` capability probe even when the router does not mark it loaded. It never walks a list of unloaded models causing repeated cold starts. If that single probe cannot reach the server, the failure is reported as a connection problem and retried rather than being misreported as an invalid server.
 
 ## Install with HACS
 
@@ -75,6 +75,8 @@ If the endpoint requires authentication, enter its API key. The integration send
 For plain llama-server, setup reads `/props` directly. If that fails, `/v1/models` can be used for router discovery, but an OpenAI-compatible model catalogue alone is **not** accepted as proof of llama.cpp. The integration requires either a successful model-specific `/props` response or a recognizable llama.cpp/router routing error. This prevents generic Ollama, LM Studio, vLLM, or OpenAI-compatible proxies from being accepted during setup and then failing later on llama.cpp-specific request fields.
 
 A request model is selected automatically only when the server reports one as loaded or when exactly one model exists. A multi-model endpoint with no loaded/default signal is left unselected rather than silently choosing `models[0]`.
+
+llama.cpp router mode answers a bare `/props` with router-level metadata that includes placeholder model fields. Those placeholders are ignored, so a router is never presented as a model called *Llama Server*.
 
 An AI Task entity is created automatically. Additional task entities can be added as subentries, each with its own options. AI Task entities are deliberately standalone Home Assistant entities and are **not** represented as Core-style llama.cpp conversation/service devices.
 
