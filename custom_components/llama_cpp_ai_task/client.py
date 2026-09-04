@@ -240,6 +240,8 @@ class LlamaCppClient:
         except LlamaCppResponseError as direct_error:
             try:
                 records = await self._async_list_model_records()
+            except LlamaCppAuthError:
+                raise
             except LlamaCppError:
                 raise direct_error from None
 
