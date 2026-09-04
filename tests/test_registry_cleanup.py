@@ -66,7 +66,7 @@ async def test_version_2_migration_uses_real_home_assistant_registries(
 
     # Register the real ConfigEntry without setting it up; migrations run before
     # normal entry setup in Home Assistant.
-    hass.config_entries._entries[entry.entry_id] = entry  # noqa: SLF001
+    hass.config_entries._entries[entry.entry_id] = entry
 
     entity_registry = er.async_get(hass)
     device_registry = dr.async_get(hass)
@@ -136,7 +136,7 @@ async def test_migration_drops_only_blank_legacy_api_key(tmp_path) -> None:
         "data",
         MappingProxyType({CONF_URL: "http://server:8080/v1", CONF_API_KEY: ""}),
     )
-    hass.config_entries._entries[entry.entry_id] = entry  # noqa: SLF001
+    hass.config_entries._entries[entry.entry_id] = entry
 
     assert await integration.async_migrate_entry(hass, entry) is True
     assert entry.data == {CONF_URL: "http://server:8080"}
