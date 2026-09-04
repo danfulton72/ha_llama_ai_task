@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Mapping
 
 import voluptuous as vol
 
@@ -66,6 +66,8 @@ from .const import (
 )
 from .helpers import model_name_to_title
 
+CONF_REMOVE_API_KEY = "remove_api_key"
+
 STEP_USER_DATA_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_URL, default=DEFAULT_URL): TextSelector(
@@ -76,6 +78,21 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
         ),
     }
 )
+
+
+def _reconfigure_schema(*, has_api_key: bool) -> vol.Schema:
+    """Build reconfigure fields without sending a stored secret to the browser."""
+    fields: dict[Any, Any] = {
+        vol.Required(CONF_URL): TextSelector(
+            TextSelectorConfig(type=TextSelectorType.URL)
+        ),
+        vol.Optional(CONF_API_KEY): TextSelector(
+            TextSelectorConfig(type=TextSelectorType.PASSWORD)
+        ),
+    }
+    if has_api_key:
+        fields[vol.Optional(CONF_REMOVE_API_KEY, default=False)] = BooleanSelector()
+    return vol.Schema(fields)
 
 
 class LlamaCppConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -132,36 +149,50 @@ class LlamaCppConfigFlow(ConfigFlow, domain=DOMAIN):
         """Change the URL or optional API key of an existing entry."""
         entry = self._get_reconfigure_entry()
         errors: dict[str, str] = {}
+        stored_api_key = entry.data.get(CONF_API_KEY) or None
 
         if user_input is not None:
             url = normalize_base_url(user_input[CONF_URL])
             if self._url_is_configured(url, exclude_entry_id=entry.entry_id):
                 return self.async_abort(reason="already_configured")
 
-            api_key = user_input.get(CONF_API_KEY) or None
-            _, _, error = await self._async_try_connect(url, api_key)
+            replacement_api_key = user_input.get(CONF_API_KEY) or None
+            remove_api_key = bool(user_input.get(CONF_REMOVE_API_KEY))
+            if replacement_api_key:
+                effective_api_key = replacement_api_key
+            elif remove_api_key:
+                effective_api_key = None
+            else:
+                effective_api_key = stored_api_key
+
+            _, _, error = await self._async_try_connect(url, effective_api_key)
             if error:
                 errors["base"] = error
             else:
-                data: dict[str, Any] = {CONF_URL: url}
-                if api_key:
-                    data[CONF_API_KEY] = api_key
+                # Preserve any future config-entry data keys. Only the fields this
+                # flow owns are changed, rather than replacing entry.data wholesale.
+                data = dict(entry.data)
+                data[CONF_URL] = url
+                if replacement_api_key:
+                    data[CONF_API_KEY] = replacement_api_key
+                elif remove_api_key:
+                    data.pop(CONF_API_KEY, None)
                 return self.async_update_reload_and_abort(entry, data=data)
 
-        defaults: dict[str, Any] = {
-            CONF_URL: entry.data[CONF_URL],
-            CONF_API_KEY: entry.data.get(CONF_API_KEY, ""),
-        }
+        # Never pre-fill a stored secret. Blank means "keep the existing key";
+        # removal is an explicit checkbox when a key is currently stored.
+        defaults: dict[str, Any] = {CONF_URL: entry.data[CONF_URL]}
         return self.async_show_form(
             step_id="reconfigure",
             data_schema=self.add_suggested_values_to_schema(
-                STEP_USER_DATA_SCHEMA, user_input or defaults
+                _reconfigure_schema(has_api_key=bool(stored_api_key)),
+                user_input or defaults,
             ),
             errors=errors,
         )
 
     async def async_step_reauth(
-        self, entry_data: dict[str, Any]
+        self, entry_data: Mapping[str, Any]
     ) -> ConfigFlowResult:
         """Handle an authentication failure."""
         return await self.async_step_reauth_confirm()
@@ -217,7 +248,9 @@ class LlamaCppConfigFlow(ConfigFlow, domain=DOMAIN):
         client = LlamaCppClient(async_get_clientsession(self.hass), url, api_key)
         try:
             info = await client.async_detect_server_info()
-            await client.async_list_models()
+            # Refreshing is deliberately stateful: it chooses a request default
+            # only from a loaded-model signal or an unambiguous sole model.
+            await client.async_refresh_models()
         except LlamaCppAuthError:
             return None, None, "invalid_auth"
         except LlamaCppConnectionError:
@@ -229,8 +262,6 @@ class LlamaCppConfigFlow(ConfigFlow, domain=DOMAIN):
             LOGGER.exception("Unexpected error connecting to %s", url)
             return None, None, "unknown"
 
-        # async_list_models updates default_model only for a loaded model or a
-        # single-model endpoint. Never persist an arbitrary models[0].
         return info, client.default_model, None
 
     @classmethod
@@ -358,6 +389,8 @@ def _options_schema(models: list[str]) -> vol.Schema:
                 )
             ),
             vol.Required(CONF_THINKING, default=DEFAULT_THINKING): BooleanSelector(),
+            # This is a force-on override. False leaves capability auto-detection
+            # in charge; True lets users work around servers that omit modalities.
             vol.Required(CONF_ATTACHMENTS, default=False): BooleanSelector(),
         }
     )
