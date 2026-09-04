@@ -14,6 +14,7 @@ from custom_components.llama_cpp_ai_task.helpers import (
     _isolate_json,
     _to_json_schema,
     attachments_supported,
+    model_name_to_title,
     strip_thinking,
 )
 
@@ -67,6 +68,14 @@ def test_isolate_json() -> None:
     assert _isolate_json('```json\n{"ok": true}\n```') == '{"ok": true}'
     assert _isolate_json('Result: {"ok": true} done') == '{"ok": true}'
     assert _isolate_json("nothing structured") == "nothing structured"
+
+
+def test_model_name_to_title_matches_core_llama_cpp() -> None:
+    """Use the same inverse-slug convention as Home Assistant Core llama.cpp."""
+    assert model_name_to_title("qwen3.5-4b") == "Qwen3.5 4b"
+    assert model_name_to_title("deepseek-v4-flash") == "Deepseek V4 Flash"
+    assert model_name_to_title("llama-3.2-3b-instruct") == "Llama 3.2 3b Instruct"
+    assert model_name_to_title("anthropic/claude-fable-5") == "Anthropic Claude Fable 5"
 
 
 def test_schema_conversion_and_cleaning() -> None:

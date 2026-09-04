@@ -82,6 +82,16 @@ def attachments_supported(*, forced: bool, vision: bool, audio: bool) -> bool:
     return bool(forced or vision or audio)
 
 
+def model_name_to_title(model_id: str) -> str:
+    """Convert a model ID to a title using Home Assistant Core's convention.
+
+    This intentionally mirrors ``homeassistant.components.llama_cpp.api`` so a
+    model such as ``qwen3.5-4b`` is presented consistently as ``Qwen3.5 4b``.
+    """
+    words = model_id.replace("-", " ").replace("_", " ").replace("/", " ").split()
+    return " ".join(word.capitalize() for word in words)
+
+
 def _isolate_json(text: str) -> str:
     """Return the JSON document inside ``text``."""
     text = text.strip()

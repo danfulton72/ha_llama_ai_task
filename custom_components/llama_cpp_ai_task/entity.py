@@ -37,7 +37,7 @@ from .const import (
     DEFAULT_TOP_P,
     LOGGER,
 )
-from .helpers import _extract_text
+from .helpers import _extract_text, model_name_to_title
 
 if TYPE_CHECKING:
     from . import LlamaCppConfigEntry
@@ -47,7 +47,6 @@ class LlamaCppBaseLLMEntity(Entity):
     """Base class for entities backed by a llama.cpp server."""
 
     _attr_has_entity_name = True
-    _attr_name = None
     _attr_should_poll = False
 
     def __init__(
@@ -56,13 +55,19 @@ class LlamaCppBaseLLMEntity(Entity):
         """Initialize the entity.
 
         AI Task entities are intentionally standalone entities, not Home Assistant
-        service devices. Creating a ``DeviceEntryType.SERVICE`` device here makes
-        the task look like another llama.cpp conversation service in the UI and can
-        visually group it with the Core llama.cpp integration.
+        service devices. Their name follows Home Assistant Core's llama.cpp
+        convention and is derived from the selected model instead.
         """
         self.entry = entry
         self.subentry = subentry
         self._attr_unique_id = subentry.subentry_id
+
+        model_id = (
+            subentry.data.get(CONF_MODEL)
+            or entry.runtime_data.model
+            or subentry.title
+        )
+        self._attr_name = model_name_to_title(str(model_id))
 
     @property
     def options(self) -> dict[str, Any]:

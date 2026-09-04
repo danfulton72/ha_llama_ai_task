@@ -12,7 +12,6 @@ LOGGER: Final = logging.getLogger(__package__)
 AI_TASK_SUBENTRY_TYPE: Final = "ai_task_data"
 
 DEFAULT_URL: Final = "http://localhost:8080"
-DEFAULT_AI_TASK_NAME: Final = "llama.cpp AI Task"
 
 # Subentry option keys.
 CONF_MODEL: Final = "model"

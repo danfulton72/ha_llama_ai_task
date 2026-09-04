@@ -15,7 +15,7 @@ from homeassistant.config_entries import (
     ConfigSubentryFlow,
     SubentryFlowResult,
 )
-from homeassistant.const import CONF_NAME, CONF_URL
+from homeassistant.const import CONF_URL
 from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
@@ -51,7 +51,6 @@ from .const import (
     CONF_TIMEOUT,
     CONF_TOP_K,
     CONF_TOP_P,
-    DEFAULT_AI_TASK_NAME,
     DEFAULT_MAX_TOKENS,
     DEFAULT_REPEAT_PENALTY,
     DEFAULT_TEMPERATURE,
@@ -63,6 +62,7 @@ from .const import (
     DOMAIN,
     LOGGER,
 )
+from .helpers import model_name_to_title
 
 STEP_USER_DATA_SCHEMA = vol.Schema(
     {
@@ -88,23 +88,24 @@ class LlamaCppConfigFlow(ConfigFlow, domain=DOMAIN):
             url = normalize_base_url(user_input[CONF_URL])
             self._async_abort_entries_match({CONF_URL: url})
 
-            info, error = await self._async_try_connect(url)
+            info, model, error = await self._async_try_connect(url)
             if error:
                 errors["base"] = error
             else:
                 assert info is not None
-                title = info.model_name or "llama.cpp"
+                title_model = model or info.model_name or "llama.cpp"
+                subentry_data = {CONF_MODEL: model} if model else {}
                 return self.async_create_entry(
-                    title=title,
+                    title=info.model_name or "llama.cpp",
                     data={CONF_URL: url},
                     subentries=[
                         ConfigSubentryData(
                             subentry_type=AI_TASK_SUBENTRY_TYPE,
-                            title=DEFAULT_AI_TASK_NAME,
+                            title=model_name_to_title(title_model),
                             # Attachment support is derived from the modalities
                             # the server reports on every setup, so nothing is
                             # frozen into the subentry here.
-                            data={},
+                            data=subentry_data,
                             unique_id=None,
                         )
                     ],
@@ -131,7 +132,7 @@ class LlamaCppConfigFlow(ConfigFlow, domain=DOMAIN):
                 if other.entry_id != entry.entry_id and other.data.get(CONF_URL) == url:
                     return self.async_abort(reason="already_configured")
 
-            _, error = await self._async_try_connect(url)
+            _, _, error = await self._async_try_connect(url)
             if error:
                 errors["base"] = error
             else:
@@ -149,19 +150,28 @@ class LlamaCppConfigFlow(ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    async def _async_try_connect(self, url: str) -> tuple[Any, str | None]:
-        """Try to reach the server, returning (server_info, error_key)."""
+    async def _async_try_connect(
+        self, url: str
+    ) -> tuple[LlamaCppServerInfo | None, str | None, str | None]:
+        """Try to reach the server and identify a request-safe model ID."""
         client = LlamaCppClient(async_get_clientsession(self.hass), url)
         try:
-            return await client.async_detect_server_info(), None
+            info = await client.async_detect_server_info()
+            models = await client.async_list_models()
         except LlamaCppConnectionError:
-            return None, "cannot_connect"
+            return None, None, "cannot_connect"
         except LlamaCppError as err:
             LOGGER.debug("Unexpected response from %s: %s", url, err)
-            return None, "invalid_server"
+            return None, None, "invalid_server"
         except Exception:
             LOGGER.exception("Unexpected error connecting to %s", url)
-            return None, "unknown"
+            return None, None, "unknown"
+
+        # Only persist a model proven by /v1/models (or llama-swap routing).
+        # /props model_alias/model_path is useful for naming but is not guaranteed
+        # to be a valid OpenAI request model ID.
+        model = client.default_model or (models[0] if models else None)
+        return info, model, None
 
     @classmethod
     @callback
@@ -194,32 +204,42 @@ class LlamaCppSubentryFlowHandler(ConfigSubentryFlow):
         entry = self._get_entry()
         is_new = self.source != SOURCE_RECONFIGURE
 
-        if user_input is not None:
-            name = user_input.pop(CONF_NAME, DEFAULT_AI_TASK_NAME)
-            if is_new:
-                return self.async_create_entry(title=name, data=user_input)
-            return self.async_update_and_abort(
-                entry, self._get_reconfigure_subentry(), data=user_input
-            )
-
         # The entry may not be loaded (server offline), so fall back to blanks.
         runtime = getattr(entry, "runtime_data", None)
         info = runtime.info if runtime else LlamaCppServerInfo()
         models = await runtime.client.async_list_models() if runtime else []
+        request_model = runtime.client.default_model if runtime else None
+        if not request_model and models:
+            request_model = models[0]
+        title_model = request_model or info.model_name or "llama.cpp"
+
+        if user_input is not None:
+            model = user_input.get(CONF_MODEL) or title_model
+            title = model_name_to_title(str(model))
+            if is_new:
+                return self.async_create_entry(title=title, data=user_input)
+            return self.async_update_and_abort(
+                entry,
+                self._get_reconfigure_subentry(),
+                data=user_input,
+                title=title,
+            )
 
         if is_new:
             # CONF_ATTACHMENTS is a force-on override, not the detected value.
-            defaults: dict[str, Any] = {CONF_NAME: DEFAULT_AI_TASK_NAME}
-            if runtime and runtime.client.default_model:
-                defaults[CONF_MODEL] = runtime.client.default_model
+            defaults: dict[str, Any] = {}
+            if request_model:
+                defaults[CONF_MODEL] = request_model
         else:
             subentry = self._get_reconfigure_subentry()
-            defaults = {CONF_NAME: subentry.title, **subentry.data}
+            defaults = dict(subentry.data)
+            if CONF_MODEL not in defaults and request_model:
+                defaults[CONF_MODEL] = request_model
 
         return self.async_show_form(
             step_id="set_options",
             data_schema=self.add_suggested_values_to_schema(
-                _options_schema(models, include_name=is_new), defaults
+                _options_schema(models), defaults
             ),
             description_placeholders={
                 "model": info.model_name or "unknown",
@@ -228,13 +248,8 @@ class LlamaCppSubentryFlowHandler(ConfigSubentryFlow):
         )
 
 
-def _options_schema(models: list[str], *, include_name: bool) -> vol.Schema:
+def _options_schema(models: list[str]) -> vol.Schema:
     """Build the AI Task option schema."""
-    schema: dict[Any, Any] = {}
-
-    if include_name:
-        schema[vol.Required(CONF_NAME, default=DEFAULT_AI_TASK_NAME)] = TextSelector()
-
     if models:
         model_selector: Any = SelectSelector(
             SelectSelectorConfig(
@@ -246,7 +261,7 @@ def _options_schema(models: list[str], *, include_name: bool) -> vol.Schema:
     else:
         model_selector = TextSelector()
 
-    schema.update(
+    return vol.Schema(
         {
             vol.Optional(CONF_MODEL): model_selector,
             vol.Optional(CONF_PROMPT): TemplateSelector(),
@@ -267,12 +282,9 @@ def _options_schema(models: list[str], *, include_name: bool) -> vol.Schema:
             ): NumberSelector(NumberSelectorConfig(min=1, max=2, step=0.01)),
             vol.Required(CONF_TIMEOUT, default=DEFAULT_TIMEOUT): NumberSelector(
                 NumberSelectorConfig(
-                    min=10, max=900, step=5, mode=NumberSelectorMode.BOX
-                )
+                    min=10, max=900, step=5, mode=NumberSelectorMode.BOX)
             ),
             vol.Required(CONF_THINKING, default=DEFAULT_THINKING): BooleanSelector(),
             vol.Required(CONF_ATTACHMENTS, default=False): BooleanSelector(),
         }
     )
-
-    return vol.Schema(schema)
