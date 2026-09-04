@@ -17,10 +17,12 @@
         "title": "Reconfigure llama.cpp",
         "data": {
           "url": "Server URL",
-          "api_key": "API key"
+          "api_key": "New API key",
+          "remove_api_key": "Remove stored API key"
         },
         "data_description": {
-          "api_key": "Optional. Leave empty to remove authentication."
+          "api_key": "Optional. Stored credentials are never pre-filled. Leave blank to keep the current key, or enter a value to replace it.",
+          "remove_api_key": "Remove the existing key and connect without authentication. A newly entered API key takes precedence."
         }
       },
       "reauth_confirm": {
