@@ -127,11 +127,19 @@ async def test_client_http_round_trip_and_router_discovery() -> None:
     async def html(_request: web.Request) -> web.Response:
         return web.Response(text="<html>hello</html>", content_type="text/html")
 
+    async def generic_props(_request: web.Request) -> web.Response:
+        return web.json_response({"detail": "Not Found"}, status=404)
+
+    async def generic_models(_request: web.Request) -> web.Response:
+        return web.json_response({"data": [{"id": "generic-model"}]})
+
     app = web.Application()
     app.router.add_get("/props", props)
     app.router.add_get("/v1/models", models)
     app.router.add_post("/v1/chat/completions", chat)
     app.router.add_get("/bad/props", html)
+    app.router.add_get("/generic/props", generic_props)
+    app.router.add_get("/generic/v1/models", generic_models)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", 0)
@@ -146,7 +154,11 @@ async def test_client_http_round_trip_and_router_discovery() -> None:
             assert client.base_url == base_url
             assert (await client.async_detect_server_info()).n_ctx == 32768
             assert client.default_model is None
+
+            # Listing is pure: it must not establish a request default implicitly.
             assert await client.async_list_models() == ["unsloth/Qwen3-8B-GGUF"]
+            assert client.default_model is None
+            assert await client.async_refresh_models() == ["unsloth/Qwen3-8B-GGUF"]
             assert client.default_model == "unsloth/Qwen3-8B-GGUF"
 
             v1_client = LlamaCppClient(session, f"{base_url}/v1")
@@ -154,7 +166,7 @@ async def test_client_http_round_trip_and_router_discovery() -> None:
             assert (await v1_client.async_detect_server_info()).build_info == "b8681"
 
             # Generic router records deliberately do not contain llama-swap
-            # markers. A loaded model is enough to route /props safely.
+            # markers. A successful model-specific /props probe proves llama.cpp.
             state["router"] = True
             state["records"] = [
                 {
@@ -185,9 +197,8 @@ async def test_client_http_round_trip_and_router_discovery() -> None:
             assert last_body["model"] == "qwen3.5-4b"
             assert "model" not in payload
 
-            # With several unloaded models, discovery accepts the routed model
-            # catalogue but must not trigger a cold-start /props probe or choose
-            # an arbitrary first model.
+            # With several unloaded models, a recognizable router /props error is
+            # enough to identify the router, but discovery must not cold-start any.
             state["records"] = [
                 {"id": "one", "status": {"value": "unloaded"}},
                 {"id": "two", "status": {"value": "unloaded"}},
@@ -201,16 +212,25 @@ async def test_client_http_round_trip_and_router_discovery() -> None:
             assert await cold.async_list_models() == ["one", "two"]
             assert cold.default_model is None
 
-            # A sole routed model is a safe request default but is still not
-            # cold-started merely to inspect /props during setup.
+            # A sole model gets one capability probe with autoload=false. If the
+            # router reports it is not loaded, the router signal is still enough
+            # to accept it without causing an intentional cold start.
             state["records"] = [
                 {"id": "only", "status": {"value": "unloaded"}}
             ]
             state["routed_props"] = []
             sole = LlamaCppClient(session, base_url)
-            await sole.async_detect_server_info()
+            sole_info = await sole.async_detect_server_info()
+            assert sole_info.props == {}
             assert sole.default_model == "only"
-            assert state["routed_props"] == []
+            assert state["routed_props"] == [("only", "false")]
+
+            # A generic OpenAI-compatible model catalogue does not by itself prove
+            # that the endpoint is llama.cpp. Both direct and routed /props fail
+            # without a llama.cpp/router signal, so setup must reject the server.
+            generic = LlamaCppClient(session, f"{base_url}/generic")
+            with pytest.raises(LlamaCppResponseError, match="Not Found"):
+                await generic.async_detect_server_info()
 
             with pytest.raises(LlamaCppResponseError, match="Model not found"):
                 await client.async_chat_completion(
