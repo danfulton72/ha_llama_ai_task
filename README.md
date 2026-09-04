@@ -7,20 +7,21 @@ A HACS-installable custom integration that exposes a local `llama.cpp` (`llama-s
 ## Features
 
 - One standalone `ai_task` entity per configured subentry; AI Tasks are not exposed as conversation/service devices.
-- Model-based entity naming using the same model-title convention as Home Assistant Core's llama.cpp integration.
+- New tasks use the same **model-to-title conversion** as Home Assistant Core's llama.cpp integration, while task titles you rename are preserved.
 - Structured output using JSON Schema sent to llama.cpp, with a second Home Assistant-side validation pass before results are returned.
 - Image and audio attachments when `llama-server` supports them.
 - Per-task model and sampler settings.
 - Prompt-cache reuse with `cache_prompt`.
-- Direct unauthenticated connection to a local llama-server or llama-swap instance.
-- Automatic llama-swap model routing: the integration prefers an already-loaded model for server introspection and as the default task model.
+- Optional Bearer-token/API-key authentication for llama-server, llama-swap, or an authenticating reverse proxy.
+- Router-aware discovery for llama-swap and llama.cpp router mode without depending on llama-swap-specific model metadata.
+- Safe routed discovery that does not walk and cold-start a list of unloaded models during setup.
 - No cloud service calls from the integration.
 
 ## Requirements
 
 - Home Assistant 2026.8 or newer. Home Assistant 2026.9 replaced `voluptuous-openapi` with `probatio`; the integration detects which converter Core ships and uses it.
 - HACS for HACS installation.
-- A reachable recent `llama-server` build, or a llama-swap instance routing to recent llama-server builds, that does not require API-key authentication.
+- A reachable recent `llama-server` build, llama.cpp router-mode server, or llama-swap instance routing to recent llama-server builds.
 
 ## Start llama-server
 
@@ -46,13 +47,13 @@ From the Home Assistant host, a useful direct llama-server connectivity check is
 curl -s http://YOUR_SERVER:8080/props
 ```
 
-For llama-swap, list its routed models first:
+For a router, list its models first:
 
 ```bash
-curl -s http://YOUR_LLAMA_SWAP:8080/v1/models
+curl -s http://YOUR_ROUTER:8080/v1/models
 ```
 
-llama-swap requires a model when routing llama.cpp-specific endpoints such as `/props`. The integration detects this automatically and prefers a model whose status is `loaded`.
+Some routers require a model query parameter for model-specific endpoints such as `/props`. The integration handles this automatically. It probes models reported as already loaded with `autoload=false` where that parameter is supported. If exactly one model exists, it may perform one `autoload=false` capability probe even when the router does not mark it loaded. It never walks a list of unloaded models causing repeated cold starts. If that single probe cannot reach the server, the failure is reported as a connection problem and retried rather than being misreported as an invalid server.
 
 ## Install with HACS
 
@@ -67,17 +68,26 @@ Manual installation is also possible by copying `custom_components/llama_cpp_ai_
 
 ## Configure
 
-Enter the server URL, for example `http://192.168.1.10:8080`. Both the server-root form and an OpenAI-compatible URL ending in `/v1` are accepted; the integration normalizes `/v1` back to the server root before using llama.cpp-specific endpoints. The server must be reachable without API-key authentication.
+Enter the server URL, for example `http://192.168.1.10:8080`. Both the server-root form and an OpenAI-compatible URL ending in `/v1` are accepted; the integration normalizes `/v1` back to the server root before using llama.cpp-specific endpoints. Older stored `/v1` URLs are normalized automatically during the VERSION 2 config-entry migration, so the same server cannot be added twice under the two spellings.
 
-For plain llama-server, setup reads `/props` directly. For llama-swap, if bare `/props` cannot be routed, setup reads `/v1/models`, prefers an already-loaded model, and retries `/props?model=<id>`. That same model becomes the default routing model for AI Tasks unless a task explicitly selects another model.
+If the endpoint requires authentication, enter its API key. The integration sends it as `Authorization: Bearer <key>`. The field is optional. Reconfigure never sends the stored secret back to the browser: leave the new-key field blank to keep the existing key, enter a value to replace it, or use **Remove stored API key** to connect without authentication. A 401/403 is treated as an authentication failure and starts Home Assistant's reauthentication flow instead of being misreported as an invalid server or retried forever.
 
-An AI Task entity is created automatically. Additional task entities can be added as subentries, each with its own options. AI Task entities are standalone Home Assistant entities and are not represented as llama.cpp conversation/service devices.
+For plain llama-server, setup reads `/props` directly. If that fails, `/v1/models` can be used for router discovery, but an OpenAI-compatible model catalogue alone is **not** accepted as proof of llama.cpp. The integration requires either a successful model-specific `/props` response or a recognizable llama.cpp/router routing error. This prevents generic Ollama, LM Studio, vLLM, or OpenAI-compatible proxies from being accepted during setup and then failing later on llama.cpp-specific request fields.
 
-Like Home Assistant Core's llama.cpp integration, the selected model determines the task name. For example, model ID `qwen3.5-4b` is shown as **Qwen3.5 4b** and normally receives entity ID `ai_task.qwen3_5_4b`. Existing autogenerated IDs such as `ai_task.llama_cpp_ai_task_<id>` are migrated on reload; an entity ID you manually renamed is preserved. Changing the selected model also updates the subentry/display title.
+A request model is selected automatically only when the server reports one as loaded or when exactly one model exists. A multi-model endpoint with no loaded/default signal is left unselected rather than silently choosing `models[0]`.
+
+llama.cpp router mode answers a bare `/props` with router-level metadata that includes placeholder model fields. Those placeholders are ignored, so a router is never presented as a model called *Llama Server*.
+
+An AI Task entity is created automatically. Additional task entities can be added as subentries, each with its own options. AI Task entities are deliberately standalone Home Assistant entities and are **not** represented as Core-style llama.cpp conversation/service devices.
+
+The model-to-title *string conversion* mirrors Home Assistant Core. For example, model ID `qwen3.5-4b` defaults to title **Qwen3.5 4b** and a newly created task normally receives entity ID `ai_task.qwen3_5_4b`. The architecture intentionally differs from Core: this integration does not create a `DeviceEntryType.SERVICE` device. After creation, the subentry title is user-owned. If you rename a task to **Kitchen classifier**, a restart, reload, or model change will not force it back to the model name.
+
+**Existing entity IDs are never automatically renamed by the VERSION 2 migration.** Older IDs such as `ai_task.llama_cpp_ai_task_<id>` may already be referenced by automations, scripts, dashboards, or templates, and a programmatic entity-registry rename would not safely rewrite all of those references. The migration therefore preserves the old ID, while new entities get the improved model-derived ID convention. You can still rename an existing entity manually in Home Assistant when you are ready to update its references.
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| Model | automatic | Determines the AI Task name as well as the model used for requests. llama-swap prefers its already-loaded model; direct llama-server uses the first model it advertises when available. |
+| API key | empty | Optional Bearer token for the server/router/reverse proxy. Stored secrets are not pre-filled during reconfigure. |
+| Model | automatic when unambiguous | A reported loaded model or the sole available model may be selected automatically. Multi-model routers with no loaded/default signal are left unselected until you choose one. The model supplies the default title only when a task is first created. |
 | Extra instructions | empty | Added to the system prompt for each request. Rendered as a Home Assistant template. |
 | Maximum tokens | 1024 | Raise for larger structured responses. |
 | Temperature | 0.4 | Lower values are usually better for deterministic data tasks. |
@@ -138,8 +148,8 @@ Hybrid reasoning models are asked not to think by default using `chat_template_k
 
 - This integration does not implement Home Assistant LLM tool calling.
 - It does not provide a conversation agent; Home Assistant Core's `llama.cpp` integration already covers that use case.
-- API-key-authenticated llama-server/llama-swap instances are not supported.
-- On llama-swap, server-level capability information is taken from the automatically selected routed model. A task that explicitly chooses a different model may have different multimodal capabilities.
+- Server-level capability information comes from `/props` when it can be inspected without intentionally cold-starting an unloaded routed model. On a multi-model router with no loaded model, capability information can remain unknown until a model is loaded. A sole model gets one safe `autoload=false` probe.
+- A task that explicitly chooses a different model may have different multimodal capabilities from the model inspected during setup.
 - Attachments must resolve to local files and are inlined into the request.
 - Structured output is requested as `response_format.json_schema.schema`, which needs a llama.cpp build recent enough to read that field.
 - llama.cpp has had releases where structured-output constraints could fail open. This integration therefore validates the final data again in Home Assistant and fails the task if the structure does not match.
@@ -149,9 +159,11 @@ Hybrid reasoning models are asked not to think by default using `chat_template_k
 
 | Symptom | Likely cause |
 | --- | --- |
-| Failed to connect during setup | `llama-server`/llama-swap is not reachable from Home Assistant, is bound only to loopback, requires authentication, or a firewall is blocking it. |
-| llama-swap reports `no model id could be identified` | Update to a release of this integration with llama-swap routing support. Setup will query `/v1/models` and retry `/props` with a model ID automatically. |
-| Config entry not ready after restart | The server/model is still starting; Home Assistant retries. |
+| Failed to connect during setup | `llama-server`/router is not reachable from Home Assistant, is bound only to loopback, or a firewall is blocking it. |
+| Authentication failed / reauthentication requested | The endpoint returned HTTP 401/403. Check the optional API key or reverse-proxy authentication settings. |
+| Address responds but is reported as an invalid server | The endpoint exposes OpenAI-compatible APIs but did not provide llama.cpp `/props` evidence. Confirm you are pointing at llama-server, llama.cpp router mode, or llama-swap rather than a generic OpenAI-compatible server. |
+| Router has several unloaded models and no model is selected | Choose the desired model in the AI Task options. Discovery intentionally avoids cold-starting each model merely to inspect it. |
+| Config entry not ready after restart | The server itself is unreachable or otherwise returned a transient non-auth error; Home Assistant retries. |
 | Structured task fails validation | The model/server ignored or could not enforce the response schema. Try a newer llama.cpp build and keep thinking disabled. |
 | Task stops at token limit | Increase **Maximum tokens** or reduce the requested output. |
 | Attachments fail | Start llama.cpp with the appropriate multimodal projector and confirm the attachment is a supported local image/audio file. |
@@ -164,7 +176,7 @@ logger:
     custom_components.llama_cpp_ai_task: debug
 ```
 
-Debug logs intentionally do not print prompt text or base64 attachment contents.
+Debug logs intentionally do not print API keys, prompt text, or base64 attachment contents.
 
 ## Repository layout
 

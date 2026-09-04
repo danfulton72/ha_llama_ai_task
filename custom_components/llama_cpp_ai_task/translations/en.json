@@ -3,29 +3,46 @@
     "step": {
       "user": {
         "title": "Connect to llama.cpp",
-        "description": "Enter the address of your llama-server instance. Start the server with --jinja so that chat templates and JSON schemas are handled correctly.",
+        "description": "Enter the address of your llama-server or compatible router. Start llama-server with --jinja so chat templates and JSON schemas are handled correctly.",
         "data": {
-          "url": "Server URL"
+          "url": "Server URL",
+          "api_key": "API key"
         },
         "data_description": {
-          "url": "For example http://192.168.1.10:8080"
+          "url": "For example http://192.168.1.10:8080",
+          "api_key": "Optional. Used as a Bearer token for llama-server, llama-swap, or an authenticating reverse proxy."
         }
       },
       "reconfigure": {
         "title": "Reconfigure llama.cpp",
         "data": {
-          "url": "Server URL"
+          "url": "Server URL",
+          "api_key": "New API key",
+          "remove_api_key": "Remove stored API key"
+        },
+        "data_description": {
+          "api_key": "Optional. Stored credentials are never pre-filled. Leave blank to keep the current key, or enter a value to replace it.",
+          "remove_api_key": "Remove the existing key and connect without authentication. A newly entered API key takes precedence."
+        }
+      },
+      "reauth_confirm": {
+        "title": "Update llama.cpp authentication",
+        "description": "The server at {url} rejected the current credentials. Enter a valid API key, or leave it empty if the server no longer requires authentication.",
+        "data": {
+          "api_key": "API key"
         }
       }
     },
     "error": {
-      "cannot_connect": "Failed to connect. Check that llama-server is running and reachable from Home Assistant.",
-      "invalid_server": "The address responded, but does not look like a llama.cpp server.",
+      "cannot_connect": "Failed to connect. Check that llama-server or the router is running and reachable from Home Assistant.",
+      "invalid_auth": "Authentication failed. Check the API key or the authentication settings on the server or reverse proxy.",
+      "invalid_server": "The address responded, but does not expose the llama.cpp endpoints this integration needs.",
       "unknown": "Unexpected error"
     },
     "abort": {
       "already_configured": "This server is already configured",
-      "reconfigure_successful": "Re-configuration was successful"
+      "reconfigure_successful": "Re-configuration was successful",
+      "reauth_successful": "Authentication was updated successfully"
     }
   },
   "config_subentries": {
@@ -39,7 +56,7 @@
       "step": {
         "set_options": {
           "title": "AI task options",
-          "description": "The server reports {model} with a context size of {n_ctx} tokens. The selected model determines the AI Task name.",
+          "description": "The server reports {model} with a context size of {n_ctx} tokens. New AI Tasks default to the selected model name; a title you rename later is preserved.",
           "data": {
             "model": "Model",
             "prompt": "Extra instructions",
@@ -53,7 +70,7 @@
             "attachments": "Always allow attachments"
           },
           "data_description": {
-            "model": "The model ID also determines the AI Task entity name.",
+            "model": "Used as the default title when the AI Task is created. Multi-model routers are not assigned an arbitrary first model.",
             "prompt": "Added to the system prompt for every task. Rendered as a Home Assistant template, so {{ states('sensor.example') }} works.",
             "max_tokens": "Structured answers need enough room; the request fails if the model is cut off.",
             "temperature": "Lower values give more repeatable results. 0.2-0.5 works well for data tasks.",

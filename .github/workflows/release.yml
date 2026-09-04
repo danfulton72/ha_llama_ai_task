@@ -69,6 +69,11 @@ jobs:
               && git ls-remote --exit-code --tags origin "refs/tags/${CURRENT_TAG}" >/dev/null 2>&1; then
               echo "Found ${CURRENT_TAG} tag without a GitHub Release; recovering it."
               VERSION="${CURRENT}"
+            elif [[ -f RELEASE_VERSION ]]; then
+              # A branch can request one deliberate non-patch release (for
+              # example 1.0.4 -> 1.1.0) without making main's pre-release
+              # manifest disagree with the currently published release.
+              VERSION="$(python scripts/release.py normalize "$(cat RELEASE_VERSION)")"
             else
               VERSION="$(python scripts/release.py next-patch)"
             fi
@@ -144,8 +149,11 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add custom_components/llama_cpp_ai_task/manifest.json
+          if [[ -f RELEASE_VERSION ]]; then
+            git rm RELEASE_VERSION
+          fi
           if git diff --cached --quiet; then
-            echo "manifest.json did not change for ${VERSION}" >&2
+            echo "Release state did not change for ${VERSION}" >&2
             exit 1
           fi
           git commit -m "Release ${TAG}"
@@ -155,10 +163,19 @@ jobs:
       - name: Build release archive
         shell: bash
         run: |
-          # hacs.json sets `zip_release` with this exact filename, so the asset
-          # name is constant and the archive holds integration files at its root.
+          # hacs.json sets zip_release with this exact filename, so the asset name
+          # is constant and the integration files must remain at the archive root.
+          # Archive the tracked tree directly: unlike zipping the compiled
+          # worktree, git archive cannot sweep generated __pycache__/.pyc files in.
           mkdir -p dist
-          (cd custom_components/llama_cpp_ai_task && zip -qr "${GITHUB_WORKSPACE}/dist/llama_cpp_ai_task.zip" .)
+          git archive \
+            --format=zip \
+            --output="${GITHUB_WORKSPACE}/dist/llama_cpp_ai_task.zip" \
+            HEAD:custom_components/llama_cpp_ai_task
+          if unzip -Z1 dist/llama_cpp_ai_task.zip | grep -Eq '(^|/)__pycache__/|\.py[co]$'; then
+            echo "Release archive contains Python bytecode" >&2
+            exit 1
+          fi
           (cd dist && sha256sum llama_cpp_ai_task.zip > llama_cpp_ai_task.zip.sha256)
 
       - name: Publish GitHub Release

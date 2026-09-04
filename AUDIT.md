@@ -1,146 +1,239 @@
 # Home Assistant / HACS audit
 
-Audit date: 2026-09-03
+Audit date: 2026-09-04
 
-## Result
+This document records the current compatibility and safety review for
+`danfulton72/ha_llama_ai_task`. It is intentionally updated when repository
+behaviour changes; older release decisions are recorded in the history section
+rather than being left as apparently-current findings.
 
-The original ZIP was **not safe to publish as a current HACS integration without changes**. The repository version has been repackaged and adjusted so it can coexist with current Home Assistant and follow the current custom-integration layout.
+## Current result
 
-## Fixed before publishing
+The repository is structured as a HACS custom integration under
+`custom_components/llama_cpp_ai_task/` and deliberately uses the unique domain
+`llama_cpp_ai_task` so it can coexist with Home Assistant Core's official
+`llama_cpp` conversation integration.
 
-### 1. Core domain collision — critical
+The v1.1.0 stabilization branch is designed for Home Assistant 2026.8 and
+2026.9. CI exercises both versions, plus HACS validation and hassfest.
 
-The ZIP used the domain `llama_cpp`. Home Assistant Core introduced an official `llama_cpp` integration in Home Assistant 2026.8. A custom integration with that same domain overrides the Core integration, which Home Assistant explicitly discourages.
+## Current integration contract
 
-**Fix:** the custom integration domain is now `llama_cpp_ai_task` and the integration name is `llama.cpp AI Task`.
+### Home Assistant compatibility
 
-References:
-- https://www.home-assistant.io/integrations/llama_cpp
-- https://developers.home-assistant.io/docs/creating_integration_file_structure/
+- Minimum supported Home Assistant version: 2026.8.
+- Home Assistant 2026.8 uses the older voluptuous/OpenAPI converter path;
+  2026.9 uses `probatio`. The integration resolves the available converter at
+  import time and CI tests both versions.
+- AI Task entities use `AITaskEntity`, `GenDataTask`, `GenDataTaskResult`,
+  config subentries, `ChatLog`, local attachment paths, and Home Assistant's
+  shared aiohttp session.
+- AI Tasks are standalone entities. This intentionally differs from Core
+  llama.cpp's service-device entity structure; only the model-to-title string
+  conversion is mirrored.
 
-### 2. HACS repository layout — critical
+### Authentication
 
-The ZIP placed `__init__.py`, `manifest.json`, platform files, and other runtime files at repository root. HACS integrations should place runtime files under `custom_components/<domain>/` unless `content_in_root` is explicitly used.
+- API-key authentication is optional.
+- When configured, the key is sent only as `Authorization: Bearer <key>`.
+- HTTP 401/403 is a distinct authentication failure. During setup it becomes a
+  Home Assistant reauthentication request instead of an endless
+  `ConfigEntryNotReady` retry; config flows show `invalid_auth`.
+- Reconfigure never pre-fills the stored API key into the browser. Leaving the
+  new-key field blank preserves an existing key; an explicit remove control
+  deletes it; entering a replacement key takes precedence.
+- Reconfigure starts from the existing `entry.data` mapping so future unrelated
+  config-entry keys are not silently discarded.
+- Debug logging does not print API keys, prompt text, or base64 attachment data.
 
-**Fix:** runtime files now live under `custom_components/llama_cpp_ai_task/`, and a root `hacs.json` has been added.
+### VERSION 2 migration and entity identity
 
-Reference:
-- https://hacs.xyz/docs/publish/integration/
+Persistent migration is performed by `async_migrate_entry`, not from
+`async_setup_entry`.
 
-### 3. Custom-integration translations — high
+VERSION 2:
 
-The ZIP used `strings.json`. Current Home Assistant custom integrations do not use Core's `strings.json` build step; they need language files under `translations/`.
+- normalizes stored server URLs so a legacy `.../v1` value becomes the server
+  root;
+- removes only blank/null legacy API-key values while retaining a real key;
+- converts the known legacy default subentry title to a model-derived default
+  only when a model was actually stored;
+- preserves any user-owned subentry title;
+- detaches entities from legacy custom `DeviceEntryType.SERVICE` devices and
+  removes only devices owned by this custom integration/config entry;
+- **does not programmatically rename any existing entity ID**.
 
-**Fix:** English strings are now in `custom_components/llama_cpp_ai_task/translations/en.json`.
+The last point is deliberate. Existing entity IDs may be referenced by
+Home Assistant automations, scripts, dashboards, templates, or external clients.
+A direct `EntityRegistry.async_update_entity(new_entity_id=...)` migration does
+not safely rewrite all of those references. Legacy IDs such as
+`ai_task.llama_cpp_ai_task_<id>` therefore remain valid. New entities naturally
+receive the improved model-derived entity-ID convention.
 
-Reference:
-- https://developers.home-assistant.io/docs/internationalization/custom_integration/
+Subentry titles are user-owned after creation. A model name supplies the default
+for a new task, but restart/reload and later model changes do not force a custom
+name back to the model name.
 
-### 4. Structured-output fail-open risk — high
+### Server and router detection
 
-llama.cpp has had releases where a JSON schema request could be accepted without the schema actually being enforced. The original integration parsed JSON but did not validate the parsed object against Home Assistant's requested structure.
+Direct llama-server is identified through `/props`.
 
-**Fix:** after JSON parsing, the result is validated again with the original Home Assistant `vol.Schema`. A shape/type mismatch now fails the task instead of silently returning incorrect structured data.
+For routed servers:
 
-Relevant upstream examples:
-- https://github.com/ggml-org/llama.cpp/issues/24097
-- https://github.com/ggml-org/llama.cpp/issues/19051
+- `/v1/models` is used as a model catalogue, but a generic OpenAI-compatible
+  catalogue by itself is **not** accepted as proof of llama.cpp;
+- routed mode must be established by a successful model-specific `/props`
+  request, a recognized llama.cpp/router `/props` routing error, or native
+  llama.cpp router metadata such as `role: router`;
+- model routing is not gated on llama-swap-specific `owned_by` or metadata, so
+  native llama.cpp router mode is supported too;
+- already-loaded models are preferred for model-specific `/props` capability
+  inspection;
+- `autoload=false` is sent where supported;
+- the integration never walks an arbitrary list of unloaded models and triggers
+  a sequence of cold starts;
+- when exactly one routed model exists, one `autoload=false` probe is allowed so
+  capabilities can be discovered without creating a multi-model cold-start
+  storm;
+- native llama.cpp router-level `/props` is recognized and, when safe, enriched
+  with model-specific `/props` so modalities/context are not silently lost;
+- router-level `/props` carries placeholder identity fields
+  (`model_alias: "llama-server"`, `model_path: "none"`, `n_ctx: 0`) that exist
+  only so web UIs do not break. `LlamaCppServerInfo.is_router` suppresses them,
+  so a router is never mistaken for a model named **Llama Server**;
+- routing evidence is matched against the `/props` response body only. The
+  formatted error message embeds the request URL, and a host named
+  `llama-swap.lan` must not vouch for whatever answers on it;
+- a routed probe that cannot reach the server raises the connection error. A
+  slow cold start on a router that ignores `autoload=false` is therefore
+  reported and retried as a connection problem, not misreported as an invalid
+  server.
 
-### 5. Debug logging of prompt/attachment payloads — medium
+`async_list_models()` is intentionally pure. The stateful operation that may set
+`client.default_model` is `async_refresh_models()`, making calls that establish
+an automatic request default explicit. A default is selected only from a model
+reported loaded or from an unambiguous sole model; the first item in a
+multi-model list is never chosen arbitrarily. A default that a successful
+`/props` probe verified is kept across refreshes for as long as the server still
+lists it, so refreshing cannot downgrade to a model whose own probe failed.
 
-The original code logged the full chat-completion payload at debug level. For image/audio tasks that can include large base64 data and private prompt text.
+### AI Task request behaviour
 
-**Fix:** debug logging now records only model, structured/unstructured mode, and message count.
+- `cache_prompt` is enabled to reuse llama.cpp's KV cache for repeated tasks.
+- Model sampler options are passed through to llama.cpp.
+- Hybrid-reasoning templates receive
+  `chat_template_kwargs: {"enable_thinking": false}` by default because long
+  reasoning output and constrained JSON are a poor combination.
+- Structured output uses the nested
+  `response_format.json_schema.schema` shape without OpenAI's `strict` flag.
+- Returned structured data is validated again against the original Home
+  Assistant schema so a llama.cpp structured-output fail-open cannot silently
+  return the wrong shape.
+- Multiple system parts are merged into one leading system message because some
+  chat templates reject multiple system turns.
+- Tool content is deliberately skipped because this integration does not expose
+  Home Assistant LLM tool calling.
+- Image and audio attachments are inlined only from local files. Capability
+  support is derived from `/props`, with an explicit force-on override for
+  servers that fail to report modalities.
 
-### 6. Manifest/HACS metadata — medium
+### Release packaging
 
-The manifest had an empty `codeowners` array and the repository had no `hacs.json`.
+HACS uses a constant `llama_cpp_ai_task.zip` release asset.
 
-**Fix:** `@danfulton72` is listed as code owner and `hacs.json` declares the display name and a Home Assistant minimum version. That minimum was corrected to 2026.8.0 in the second pass below.
+The release quality gate runs `compileall`, but the release ZIP is built with
+`git archive HEAD:custom_components/llama_cpp_ai_task`. This means generated
+`__pycache__`, `.pyc`, and `.pyo` files from the compiled worktree cannot be
+swept into the HACS archive. The workflow additionally inspects the archive and
+fails if Python bytecode is present.
 
-## Second pass, reviewed against Home Assistant 2026.9.0
+The release workflow normally increments the patch version after successful
+push-triggered CI on `main`. A one-shot `RELEASE_VERSION` marker can request a
+specific larger version (the current stabilization target is v1.1.0) while the
+pre-release manifest remains equal to the latest published release. The marker
+is consumed in the release commit. Repository tests compare the manifest and
+marker semantically and do not hard-code a particular previous patch version.
 
-### 7. Declared minimum Home Assistant version was unreachable — critical
+## Test coverage
 
-`helpers.py` imported `probatio`, which became a Home Assistant Core dependency in 2026.9. Home Assistant 2026.8 still ships the earlier voluptuous/OpenAPI stack. Because `manifest.json` declares no requirements, a 2026.8 installation would not install `probatio` for this custom integration. The original 2025.7 floor was independently too low for attachment support.
+The repository currently has:
 
-**Fix:** the schema converter is resolved at import time, preferring `probatio.to_openapi` and falling back to `voluptuous_openapi.convert`. The declared floor is `2026.8.0` in `hacs.json` and the README. CI explicitly tests both Home Assistant 2026.8.0 and 2026.9.0 so both converter paths are exercised.
+- in-process HTTP client tests covering direct llama-server, routed discovery,
+  generic OpenAI-compatible rejection, model default selection, timeouts, and
+  optional Bearer authentication;
+- helper/schema/structured-output tests;
+- release/manifest workflow contract tests;
+- VERSION 2 migration tests using Home Assistant's real `ConfigEntry`,
+  `EntityRegistry`, and `DeviceRegistry` APIs rather than invented registry
+  `SimpleNamespace` mocks.
 
-### 8. Extra instructions were never rendered — high
+Migration tests use the public `ConfigEntries.async_add()` path while replacing
+only the setup call so the test can register an entry without trying to contact a
+real llama.cpp server. Each raw `HomeAssistant` test instance is explicitly shut
+down with `await hass.async_stop(force=True)`.
 
-The subentry option used a `TemplateSelector` and the strings file described it as a template, but `entity.py` passed the raw string to the model, so any Jinja reached the prompt verbatim.
+CI runs the Python suite against both Home Assistant 2026.8.0 and 2026.9.0.
 
-**Fix:** the value is rendered with `homeassistant.helpers.template.Template`, and a `TemplateError` is surfaced as a `HomeAssistantError` instead of being sent to the model.
+## Release/change history relevant to the audit
 
-### 9. Structured output used a non-canonical `response_format` — medium
+### Initial publication work
 
-The payload carried the schema twice plus OpenAI's `strict` flag. Strict mode additionally imposes schema requirements that a structure converted from Home Assistant does not necessarily satisfy, while the duplicated top-level `schema` key is not part of the canonical OpenAI-compatible nested shape.
+The original package used domain `llama_cpp`, which collided with Home Assistant
+Core's integration, and its runtime files were at repository root. Publication
+work moved it to `custom_components/llama_cpp_ai_task/`, added HACS metadata and
+custom-integration translations, revalidated structured output in Home
+Assistant, stopped logging complete model payloads, and established the 2026.8
+compatibility floor.
 
-**Fix:** only `response_format.json_schema.schema` is sent, without `strict`.
+### v1.0.1
 
-### 10. Nullability was discarded from the schema — medium
+API-key support was removed and AI Tasks were changed from custom service-device
+presentation to standalone entities. The latter prevented the custom AI Task
+from looking like another Core llama.cpp conversation service. The API-key
+removal was later reconsidered because it also excluded authenticated
+llama-server deployments and authenticating reverse proxies.
 
-OpenAPI 3.0 represents nullability with the `nullable` keyword. The integration's llama.cpp cleanup removed that keyword because it is not part of JSON Schema grammar, which could make nullable values non-nullable.
+### v1.0.3
 
-**Fix:** conversion requests OpenAPI 3.1, which expresses nullability with a JSON-schema-compatible null branch. A regression test now proves a real `null` type survives conversion rather than merely checking that `nullable` disappeared.
+llama-swap routing support was added. Setup learned to normalize an entered
+`.../v1` base URL, discover `/v1/models`, and route `/props` through a model ID.
 
-### 11. Attachment support was frozen at first setup — medium
+### v1.0.4
 
-The config flow wrote `attachments` as a concrete boolean derived from the server's modalities, which made the auto-detection fallback in `ai_task.py` dead code and meant restarting llama-server with `--mmproj` had no effect until the subentry was reconfigured. The fallback also checked vision only while the flow checked vision or audio.
+Model-based task naming was introduced using Home Assistant Core's llama.cpp
+model-to-title conversion. Review subsequently found that setup-time title
+rewrites and automatic registry ID renames were too aggressive; v1.1.0 changes
+model naming to a creation default and preserves existing entity IDs.
 
-**Fix:** `attachments` is now a force-on override that is not written during initial setup. Support is recomputed from the modalities reported at each setup via the shared `attachments_supported` helper.
+### v1.1.0 stabilization
 
-### 12. Audio attachments were not capability-checked — low
+The stabilization work restores optional API-key authentication with explicit
+auth failures, moves persistent changes into VERSION 2 migration, preserves user
+names and existing entity IDs, normalizes legacy URLs, hardens router detection,
+avoids multi-model cold starts, makes model-refresh side effects explicit,
+removes arbitrary `models[0]` selection, uses real Home Assistant registries in
+migration tests, and prevents bytecode from entering release archives.
 
-Images sent to a server without a vision projector produced a warning; audio did not.
-
-**Fix:** both image and audio branches now warn when the server does not report the corresponding capability.
-
-### 13. Repository plumbing — low
-
-- Reconfigure now rejects a URL already used by another config entry.
-- HACS release archives use a constant `llama_cpp_ai_task.zip` filename and hold the integration files at the archive root, matching the `zip_release`/`filename` pair in `hacs.json`. The existing v1.0.0 release is backfilled with the same constant-name asset before this HACS setting is merged, avoiding a broken migration window.
-- The HACS workflow no longer ignores `description` and `topics`; both repository metadata fields are set.
-- `# noqa: BLE001` was inert because `BLE` is not in the Ruff selection. The comment was removed and `RUF100` added so stale suppressions are reported.
-- GitHub Actions use current `actions/checkout@v7` and `actions/setup-python@v7` majors.
-
-## Current compatibility review
-
-Verified against the supported Home Assistant 2026.8/2026.9 boundary and current repository CI.
-
-- AI Task was introduced before the declared compatibility floor; attachment support is available throughout the supported range.
-- Home Assistant AI Task uses `AITaskEntity`, `GenDataTask`, `GenDataTaskResult`, and the `_async_generate_data(task, chat_log)` implementation hook used here.
-- `AITaskEntityFeature` exposes the features required by this integration, including data generation and attachments.
-- Entity platform setup supports `config_subentry_id`, matching this integration's subentry entity setup.
-- `ChatLog`, `SystemContent`, `UserContent`, `AssistantContent`, `Attachment.path`/`.mime_type`, and `async_add_assistant_content_without_tools` remain the interfaces used here.
-- Home Assistant 2026.9 uses `probatio`; the integration retains a 2026.8 fallback through `voluptuous_openapi`.
-- `homeassistant.helpers.llm.selector_serializer` remains available for selector-aware schema conversion.
-- `aiohttp` remains a Home Assistant Core dependency. The integration uses Home Assistant's shared client session and does not create its own long-lived session.
-- No API key is written to logs by the integration.
-
-## Remaining limitations / follow-up
-
-### Test coverage stops at the Home Assistant boundary
-
-`tests/` covers `client.py` and the pure helpers, including schema conversion and attachment-capability logic. CI runs those tests under both Home Assistant 2026.8.0 and 2026.9.0. Nothing yet drives `config_flow.py`, `__init__.py`, `entity.py`, or `ai_task.py` through a real `hass` instance.
-
-Recommended follow-up: add `pytest-homeassistant-custom-component` tests covering config flow, setup/unload, subentry creation/reconfigure, structured-output validation, attachments, auth failure, template errors, and server-unavailable behavior. Pin it to the release matching the Home Assistant version under test because it pins `homeassistant` exactly.
-
-### Brand images
-
-`custom_components/llama_cpp_ai_task/brand/icon.png` is intentionally retained. Current Home Assistant supports brand assets bundled with custom integrations, so the local icon is meaningful and does not need to be removed merely because an external `home-assistant/brands` repository also exists.
-
-### CI validation
-
-GitHub Actions validate Python tests/lint, HACS, hassfest, and release consistency. The Python matrix includes the declared minimum Home Assistant version and the 2026.9 compatibility boundary.
-
-### Feature limitations
+## Remaining limitations
 
 - No Home Assistant LLM tool calling.
-- No conversation entity (the official Core llama.cpp integration handles conversation agents).
+- No conversation entity; Home Assistant Core's `llama_cpp` integration covers
+  conversation agents.
 - No streaming.
-- No AI image generation platform.
-- Attachments are limited to supported local image/audio files and are inlined into the request.
+- No AI image-generation platform.
+- Attachments are limited to supported local image/audio files and are inlined
+  into the request.
+- On a multi-model router where no model is reported loaded, per-model capability
+  data may remain unknown until a model is loaded or explicitly selected. This
+  is preferred to starting multiple large models merely to inspect them.
+- A task explicitly selecting a different model can have capabilities that differ
+  from the model inspected at config-entry setup.
+
+## Brand assets
+
+`custom_components/llama_cpp_ai_task/brand/icon.png` is intentionally retained.
+Current Home Assistant supports local brand assets bundled with custom
+integrations, so it is not dead release content.
 
 ## HACS install target
 

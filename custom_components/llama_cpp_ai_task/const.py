@@ -12,6 +12,7 @@ LOGGER: Final = logging.getLogger(__package__)
 AI_TASK_SUBENTRY_TYPE: Final = "ai_task_data"
 
 DEFAULT_URL: Final = "http://localhost:8080"
+DEFAULT_AI_TASK_NAME: Final = "llama.cpp AI Task"
 
 # Subentry option keys.
 CONF_MODEL: Final = "model"
@@ -33,5 +34,9 @@ DEFAULT_REPEAT_PENALTY: Final = 1.1
 DEFAULT_TIMEOUT: Final = 120
 DEFAULT_THINKING: Final = False
 
-# Connection check timeout, kept short so config flow / setup fails fast.
+# Keep the direct /props probe short. Routed /props can involve an already-loaded
+# child server and gets a little more time, but discovery never intentionally
+# cold-starts a sequence of models.
 PROPS_TIMEOUT: Final = 15
+ROUTED_PROPS_TIMEOUT: Final = 60
+MAX_ROUTED_PROPS_PROBES: Final = 2
