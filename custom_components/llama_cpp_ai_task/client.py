@@ -262,6 +262,104 @@ class LlamaCppClient:
         self._default_model = _preferred_model_id(records)
         return _model_ids(records)
 
+    async def _async_probe_routed_models(
+        self,
+        records: list[dict[str, Any]],
+        *,
+        evidence_error: LlamaCppResponseError | None,
+        fallback_info: LlamaCppServerInfo | None,
+    ) -> LlamaCppServerInfo | None:
+        """Safely inspect loaded/sole routed models and return verified info.
+
+        ``fallback_info`` means the direct `/props` response already proved native
+        llama.cpp router mode (currently reported as ``role: router``). Otherwise
+        a successful model-specific `/props` response or a known routing error is
+        required before a generic OpenAI-compatible model catalogue is accepted.
+        """
+        model_ids = _model_ids(records)
+        if not model_ids:
+            return fallback_info
+
+        probed_ids: set[str] = set()
+        loaded_records = [record for record in records if _model_is_loaded(record)]
+        for record in loaded_records[:MAX_ROUTED_PROPS_PROBES]:
+            model_id = record.get("id")
+            if not isinstance(model_id, str) or not model_id:
+                continue
+            probed_ids.add(model_id)
+            try:
+                info = await self.async_get_server_info(
+                    model_id,
+                    autoload=False,
+                    timeout=ROUTED_PROPS_TIMEOUT,
+                )
+            except LlamaCppAuthError:
+                raise
+            except LlamaCppError as err:
+                LOGGER.debug(
+                    "Could not inspect loaded routed model %s: %s", model_id, err
+                )
+                continue
+            self._default_model = model_id
+            LOGGER.debug("Detected routed llama.cpp model %s", model_id)
+            return info
+
+        if len(model_ids) == 1 and model_ids[0] not in probed_ids:
+            model_id = model_ids[0]
+            try:
+                info = await self.async_get_server_info(
+                    model_id,
+                    autoload=False,
+                    timeout=ROUTED_PROPS_TIMEOUT,
+                )
+            except LlamaCppAuthError:
+                raise
+            except LlamaCppResponseError as routed_error:
+                verified = (
+                    fallback_info is not None
+                    or (
+                        evidence_error is not None
+                        and _looks_like_routed_props_error(evidence_error)
+                    )
+                    or _looks_like_routed_props_error(routed_error)
+                )
+                if not verified:
+                    return None
+                LOGGER.debug(
+                    "Recognized routed llama.cpp endpoint with sole model %s; "
+                    "model capabilities are not currently available",
+                    model_id,
+                )
+            except LlamaCppError as err:
+                if fallback_info is None:
+                    LOGGER.debug("Could not verify sole routed model %s: %s", model_id, err)
+                    return None
+                LOGGER.debug("Could not inspect sole routed model %s: %s", model_id, err)
+            else:
+                self._default_model = model_id
+                LOGGER.debug("Detected routed llama.cpp model %s", model_id)
+                return info
+
+            self._default_model = model_id
+            return fallback_info or LlamaCppServerInfo()
+
+        verified = fallback_info is not None or (
+            evidence_error is not None and _looks_like_routed_props_error(evidence_error)
+        )
+        if not verified:
+            return None
+
+        # The router is verified but no loaded model could be inspected safely.
+        # Keep capabilities unknown rather than cold-starting multiple models.
+        self._default_model = _preferred_model_id(records)
+        LOGGER.debug(
+            "Detected llama.cpp model router without probing unloaded models "
+            "(models=%d, default=%s)",
+            len(model_ids),
+            self._default_model,
+        )
+        return fallback_info or LlamaCppServerInfo()
+
     async def async_detect_server_info(self) -> LlamaCppServerInfo:
         """Discover a direct llama-server or model-routed llama.cpp endpoint.
 
@@ -287,77 +385,33 @@ class LlamaCppClient:
             except LlamaCppError:
                 raise direct_error from None
 
-            model_ids = _model_ids(records)
-            if not model_ids:
-                raise direct_error from None
-
-            loaded_records = [record for record in records if _model_is_loaded(record)]
-            for record in loaded_records[:MAX_ROUTED_PROPS_PROBES]:
-                model_id = record.get("id")
-                if not isinstance(model_id, str) or not model_id:
-                    continue
-                try:
-                    info = await self.async_get_server_info(
-                        model_id,
-                        autoload=False,
-                        timeout=ROUTED_PROPS_TIMEOUT,
-                    )
-                except LlamaCppAuthError:
-                    raise
-                except LlamaCppError as err:
-                    LOGGER.debug(
-                        "Could not inspect loaded routed model %s: %s", model_id, err
-                    )
-                    continue
-                self._default_model = model_id
-                LOGGER.debug("Detected routed llama.cpp model %s", model_id)
-                return info
-
-            if len(model_ids) == 1:
-                model_id = model_ids[0]
-                try:
-                    info = await self.async_get_server_info(
-                        model_id,
-                        autoload=False,
-                        timeout=ROUTED_PROPS_TIMEOUT,
-                    )
-                except LlamaCppAuthError:
-                    raise
-                except LlamaCppResponseError as routed_error:
-                    if not (
-                        _looks_like_routed_props_error(direct_error)
-                        or _looks_like_routed_props_error(routed_error)
-                    ):
-                        raise direct_error from None
-                    LOGGER.debug(
-                        "Recognized routed llama.cpp endpoint with sole model %s; "
-                        "model capabilities are not currently available",
-                        model_id,
-                    )
-                except LlamaCppError:
-                    raise direct_error from None
-                else:
-                    self._default_model = model_id
-                    LOGGER.debug("Detected routed llama.cpp model %s", model_id)
-                    return info
-
-                self._default_model = model_id
-                return LlamaCppServerInfo()
-
-            if not _looks_like_routed_props_error(direct_error):
-                raise direct_error from None
-
-            # The direct /props response itself identified a model router, but no
-            # loaded model could be introspected safely. Keep capabilities unknown
-            # rather than cold-starting multiple models during Home Assistant setup.
-            self._default_model = _preferred_model_id(records)
-            LOGGER.debug(
-                "Detected llama.cpp model router without probing unloaded models "
-                "(models=%d, default=%s)",
-                len(model_ids),
-                self._default_model,
+            routed_info = await self._async_probe_routed_models(
+                records,
+                evidence_error=direct_error,
+                fallback_info=None,
             )
-            return LlamaCppServerInfo()
+            if routed_info is None:
+                raise direct_error from None
+            return routed_info
+
+        if info.props.get("role") == "router":
+            # Native llama.cpp router mode exposes a successful router-level
+            # /props payload containing build/router metadata, but per-model
+            # modalities/context require /props?model=... . Safely enrich it when
+            # a loaded or sole model can be inspected without walking cold models.
+            try:
+                records = await self._async_list_model_records()
+            except LlamaCppAuthError:
+                raise
+            except LlamaCppError as err:
+                LOGGER.debug("Could not list native router models: %s", err)
+                return info
+            routed_info = await self._async_probe_routed_models(
+                records,
+                evidence_error=None,
+                fallback_info=info,
+            )
+            return routed_info or info
 
         self._default_model = None
         return info
