@@ -20,13 +20,14 @@ from custom_components.llama_cpp_ai_task.const import (
 )
 
 
-def _legacy_entry() -> ConfigEntry:
+def _legacy_entry(*, api_key: str | None = "secret") -> ConfigEntry:
     """Build an actual Home Assistant v1 config entry with two subentries."""
+    data = {CONF_URL: "http://server:8080/v1/"}
+    if api_key is not None:
+        data[CONF_API_KEY] = api_key
+
     return ConfigEntry(
-        data={
-            CONF_URL: "http://server:8080/v1/",
-            CONF_API_KEY: "secret",
-        },
+        data=data,
         discovery_keys=MappingProxyType({}),
         domain=DOMAIN,
         entry_id="legacy-entry",
@@ -55,13 +56,23 @@ def _legacy_entry() -> ConfigEntry:
     )
 
 
+async def _hass_with_registries(tmp_path) -> HomeAssistant:
+    """Create Home Assistant with the real registries initialized as Core does."""
+    hass = HomeAssistant(str(tmp_path))
+    hass.config_entries = ConfigEntries(hass, {})
+    await hass.config_entries.async_initialize()
+    dr.async_setup(hass)
+    await dr.async_load(hass, load_empty=True)
+    await er.async_load(hass, load_empty=True)
+    return hass
+
+
 @pytest.mark.asyncio
 async def test_version_2_migration_uses_real_home_assistant_registries(
     tmp_path,
 ) -> None:
     """Migrate legacy IDs/devices while preserving a user-owned task title."""
-    hass = HomeAssistant(str(tmp_path))
-    hass.config_entries = ConfigEntries(hass, {})
+    hass = await _hass_with_registries(tmp_path)
     entry = _legacy_entry()
 
     # Register the real ConfigEntry without setting it up; migrations run before
@@ -128,14 +139,8 @@ async def test_version_2_migration_uses_real_home_assistant_registries(
 @pytest.mark.asyncio
 async def test_migration_drops_only_blank_legacy_api_key(tmp_path) -> None:
     """Preserve real optional credentials but remove meaningless blank values."""
-    hass = HomeAssistant(str(tmp_path))
-    hass.config_entries = ConfigEntries(hass, {})
-    entry = _legacy_entry()
-    object.__setattr__(
-        entry,
-        "data",
-        MappingProxyType({CONF_URL: "http://server:8080/v1", CONF_API_KEY: ""}),
-    )
+    hass = await _hass_with_registries(tmp_path)
+    entry = _legacy_entry(api_key="")
     hass.config_entries._entries[entry.entry_id] = entry
 
     assert await integration.async_migrate_entry(hass, entry) is True
