@@ -57,13 +57,23 @@ def test_release_workflow_runs_after_successful_main_ci() -> None:
     assert '--expected-tag "${TAG}"' in workflow
 
 
-def test_v1_1_0_is_a_one_shot_release_target() -> None:
-    """Keep manifest at the live release until CI consumes the v1.1.0 target."""
+def test_v1_1_0_one_shot_release_target_contract() -> None:
+    """Allow the target marker before/during release and its removal afterwards."""
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
     workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+    version = tuple(map(int, manifest["version"].split(".")))
 
-    assert manifest["version"] == "1.0.4"
-    assert RELEASE_VERSION.read_text(encoding="utf-8").strip() == "1.1.0"
     assert "elif [[ -f RELEASE_VERSION ]]" in workflow
     assert 'cat RELEASE_VERSION' in workflow
     assert "git rm RELEASE_VERSION" in workflow
+
+    if RELEASE_VERSION.exists():
+        target = RELEASE_VERSION.read_text(encoding="utf-8").strip()
+        assert target == "1.1.0"
+        # Branch CI sees 1.0.4; the release quality gate sees 1.1.0 after the
+        # workflow synchronizes the manifest but before it consumes the marker.
+        assert manifest["version"] in {"1.0.4", target}
+    else:
+        # Once the release commit consumes the marker, the manifest must have
+        # reached at least the requested minor release.
+        assert version >= (1, 1, 0)
