@@ -9,11 +9,13 @@ import pytest
 from aiohttp import web
 
 from custom_components.llama_cpp_ai_task.client import (
+    LlamaCppAuthError,
     LlamaCppClient,
     LlamaCppConnectionError,
     LlamaCppResponseError,
     LlamaCppServerInfo,
     _error_message,
+    _preferred_model_id,
     normalize_base_url,
 )
 
@@ -53,71 +55,69 @@ def test_error_message() -> None:
     )
 
 
+def test_preferred_model_requires_a_strong_signal() -> None:
+    assert _preferred_model_id([{"id": "only"}]) == "only"
+    assert (
+        _preferred_model_id(
+            [
+                {"id": "first", "status": {"value": "unloaded"}},
+                {"id": "loaded", "status": {"value": "loaded"}},
+            ]
+        )
+        == "loaded"
+    )
+    assert (
+        _preferred_model_id(
+            [
+                {"id": "first", "status": {"value": "unloaded"}},
+                {"id": "second", "status": {"value": "unloaded"}},
+            ]
+        )
+        is None
+    )
+
+
 @pytest.mark.asyncio
-async def test_client_http_round_trip() -> None:
-    require_key = False
-    state: dict[str, object] = {"swap": False, "last_props_model": None}
+async def test_client_http_round_trip_and_router_discovery() -> None:
+    state: dict[str, object] = {
+        "router": False,
+        "records": [{"id": "unsloth/Qwen3-8B-GGUF"}],
+        "routed_props": [],
+    }
     last_body: dict = {}
 
     async def props(request: web.Request) -> web.Response:
-        if require_key:
-            return web.json_response({"error": {"message": "Unauthorized"}}, status=401)
-        assert "Authorization" not in request.headers
         model = request.query.get("model")
-        state["last_props_model"] = model
-        if state["swap"] and not model:
+        if state["router"] and not model:
             return web.json_response(
-                {
-                    "src": "llama-swap",
-                    "error": {
-                        "message": "no model id could be identified",
-                        "type": "invalid_request_error",
-                        "code": "not_found",
-                    },
-                },
-                status=404,
+                {"error": {"message": "model is required"}}, status=404
             )
-        if state["swap"] and model != "qwen3.5-4b":
-            return web.json_response(
-                {"error": {"message": "Model not found"}}, status=404
+        if model:
+            cast_calls = state["routed_props"]
+            assert isinstance(cast_calls, list)
+            cast_calls.append((model, request.query.get("autoload")))
+            records = state["records"]
+            assert isinstance(records, list)
+            record = next(
+                (item for item in records if item.get("id") == model), None
             )
+            if not record or record.get("status", {}).get("value") != "loaded":
+                return web.json_response(
+                    {"error": {"message": "model is not loaded"}}, status=404
+                )
         return web.json_response(PROPS)
 
     async def models(_request: web.Request) -> web.Response:
-        if state["swap"]:
-            return web.json_response(
-                {
-                    "data": [
-                        {
-                            "id": "qwen3.5-9b",
-                            "owned_by": "llama-swap",
-                            "meta": {"llamaswap": {"type": "model"}},
-                            "status": {"value": "unloaded"},
-                        },
-                        {
-                            "id": "qwen3.5-4b",
-                            "owned_by": "llama-swap",
-                            "meta": {"llamaswap": {"type": "model"}},
-                            "status": {"value": "loaded"},
-                        },
-                        {
-                            "id": "small",
-                            "owned_by": "llama-swap",
-                            "meta": {"llamaswap": {"type": "model"}},
-                            "status": {"value": "unloaded"},
-                        },
-                    ]
-                }
-            )
-        return web.json_response({"data": [{"id": "unsloth/Qwen3-8B-GGUF"}]})
+        return web.json_response({"data": state["records"]})
 
     async def chat(request: web.Request) -> web.Response:
-        assert "Authorization" not in request.headers
         body = await request.json()
         last_body.clear()
         last_body.update(body)
         if body.get("model") == "missing":
-            return web.json_response({"error": {"message": "Model not found"}}, status=404)
+            return web.json_response(
+                {"error": {"message": "Model not found"}}, status=404
+            )
         if body.get("max_tokens") == 1:
             await asyncio.sleep(0.2)
         return web.json_response(
@@ -147,36 +147,75 @@ async def test_client_http_round_trip() -> None:
             assert (await client.async_detect_server_info()).n_ctx == 32768
             assert client.default_model is None
             assert await client.async_list_models() == ["unsloth/Qwen3-8B-GGUF"]
+            assert client.default_model == "unsloth/Qwen3-8B-GGUF"
 
-            # Pasting the OpenAI-compatible base URL must still target the same
-            # llama.cpp server root rather than producing /v1/v1/... paths.
             v1_client = LlamaCppClient(session, f"{base_url}/v1")
             assert v1_client.base_url == base_url
             assert (await v1_client.async_detect_server_info()).build_info == "b8681"
 
-            # Match llama-swap's real behaviour: bare /props cannot be routed,
-            # /v1/models identifies llama-swap and reports a loaded model, and
-            # /props?model=<id> reaches the underlying llama-server.
-            state["swap"] = True
-            swap_info = await client.async_detect_server_info()
-            assert swap_info.n_ctx == 32768
-            assert client.default_model == "qwen3.5-4b"
-            assert state["last_props_model"] == "qwen3.5-4b"
-            assert await client.async_list_models() == [
-                "qwen3.5-9b",
-                "qwen3.5-4b",
-                "small",
+            # Generic router records deliberately do not contain llama-swap
+            # markers. A loaded model is enough to route /props safely.
+            state["router"] = True
+            state["records"] = [
+                {
+                    "id": "qwen3.5-9b",
+                    "owned_by": "llamacpp",
+                    "status": {"value": "unloaded"},
+                },
+                {
+                    "id": "qwen3.5-4b",
+                    "owned_by": "llamacpp",
+                    "status": {"value": "loaded"},
+                },
+                {
+                    "id": "small",
+                    "owned_by": "llamacpp",
+                    "status": {"value": "unloaded"},
+                },
             ]
+            routed = LlamaCppClient(session, base_url)
+            router_info = await routed.async_detect_server_info()
+            assert router_info.n_ctx == 32768
+            assert routed.default_model == "qwen3.5-4b"
+            assert state["routed_props"] == [("qwen3.5-4b", "false")]
 
             payload = {"messages": [{"role": "user", "content": "hello"}]}
-            result = await client.async_chat_completion(payload)
+            result = await routed.async_chat_completion(payload)
             assert result["choices"][0]["message"]["content"] == "ok"
-            assert last_body["messages"][0]["content"] == "hello"
             assert last_body["model"] == "qwen3.5-4b"
             assert "model" not in payload
 
+            # With several unloaded models, discovery accepts the routed model
+            # catalogue but must not trigger a cold-start /props probe or choose
+            # an arbitrary first model.
+            state["records"] = [
+                {"id": "one", "status": {"value": "unloaded"}},
+                {"id": "two", "status": {"value": "unloaded"}},
+            ]
+            state["routed_props"] = []
+            cold = LlamaCppClient(session, base_url)
+            cold_info = await cold.async_detect_server_info()
+            assert cold_info.props == {}
+            assert cold.default_model is None
+            assert state["routed_props"] == []
+            assert await cold.async_list_models() == ["one", "two"]
+            assert cold.default_model is None
+
+            # A sole routed model is a safe request default but is still not
+            # cold-started merely to inspect /props during setup.
+            state["records"] = [
+                {"id": "only", "status": {"value": "unloaded"}}
+            ]
+            state["routed_props"] = []
+            sole = LlamaCppClient(session, base_url)
+            await sole.async_detect_server_info()
+            assert sole.default_model == "only"
+            assert state["routed_props"] == []
+
             with pytest.raises(LlamaCppResponseError, match="Model not found"):
-                await client.async_chat_completion({"model": "missing", "messages": []})
+                await client.async_chat_completion(
+                    {"model": "missing", "messages": []}
+                )
 
             with pytest.raises(LlamaCppConnectionError, match="Timed out"):
                 await client.async_chat_completion(
@@ -186,9 +225,43 @@ async def test_client_http_round_trip() -> None:
             bad = LlamaCppClient(session, f"{base_url}/bad")
             with pytest.raises(LlamaCppResponseError, match="non-JSON"):
                 await bad.async_get_server_info()
+    finally:
+        await runner.cleanup()
 
-            require_key = True
-            with pytest.raises(LlamaCppResponseError, match="Unauthorized"):
-                await client.async_get_server_info()
+
+@pytest.mark.asyncio
+async def test_optional_api_key_is_sent_and_auth_errors_are_distinct() -> None:
+    """An API key is optional, but when set it is sent as Bearer auth."""
+    seen_headers: list[str | None] = []
+
+    async def props(request: web.Request) -> web.Response:
+        auth = request.headers.get("Authorization")
+        seen_headers.append(auth)
+        if auth != "Bearer secret":
+            return web.json_response(
+                {"error": {"message": "Unauthorized"}}, status=401
+            )
+        return web.json_response(PROPS)
+
+    app = web.Application()
+    app.router.add_get("/props", props)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    assert site._server is not None
+    port = site._server.sockets[0].getsockname()[1]
+    base_url = f"http://127.0.0.1:{port}"
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            without_key = LlamaCppClient(session, base_url)
+            with pytest.raises(LlamaCppAuthError, match="Unauthorized"):
+                await without_key.async_get_server_info()
+
+            with_key = LlamaCppClient(session, base_url, "secret")
+            assert (await with_key.async_get_server_info()).build_info == "b8681"
+
+        assert seen_headers == [None, "Bearer secret"]
     finally:
         await runner.cleanup()
