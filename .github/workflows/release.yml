@@ -27,8 +27,6 @@ concurrency:
 jobs:
   release:
     name: Publish GitHub Release
-    # Automatic releases run only after a successful push-triggered CI on main.
-    # Scheduled/manual/release-event CI runs must never create a release.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.event == 'push' &&
@@ -58,17 +56,17 @@ jobs:
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
             VERSION="$(python scripts/release.py normalize "${REQUESTED_VERSION}")"
           else
-            # GitHub Release is the version authority. In the normal case the
-            # manifest is first verified against the published release below,
-            # then its patch component is incremented. If a previous run pushed
-            # the version commit/tag but failed before publishing the release,
-            # reuse that manifest version so the workflow can recover.
             CURRENT="$(python scripts/release.py get)"
             CURRENT_TAG="v${CURRENT}"
             if ! gh release view "${CURRENT_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1 \
               && git ls-remote --exit-code --tags origin "refs/tags/${CURRENT_TAG}" >/dev/null 2>&1; then
               echo "Found ${CURRENT_TAG} tag without a GitHub Release; recovering it."
               VERSION="${CURRENT}"
+            elif [[ -f RELEASE_VERSION ]]; then
+              # A branch can request one deliberate non-patch release (for
+              # example 1.0.4 -> 1.1.0) without making main's pre-release
+              # manifest disagree with the currently published release.
+              VERSION="$(python scripts/release.py normalize "$(cat RELEASE_VERSION)")"
             else
               VERSION="$(python scripts/release.py next-patch)"
             fi
@@ -144,8 +142,11 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add custom_components/llama_cpp_ai_task/manifest.json
+          if [[ -f RELEASE_VERSION ]]; then
+            git rm RELEASE_VERSION
+          fi
           if git diff --cached --quiet; then
-            echo "manifest.json did not change for ${VERSION}" >&2
+            echo "Release state did not change for ${VERSION}" >&2
             exit 1
           fi
           git commit -m "Release ${TAG}"
@@ -155,10 +156,18 @@ jobs:
       - name: Build release archive
         shell: bash
         run: |
-          # hacs.json sets `zip_release` with this exact filename, so the asset
-          # name is constant and the archive holds integration files at its root.
+          # Archive the tracked integration tree directly. Unlike zipping the
+          # compiled worktree, git archive cannot sweep generated __pycache__ or
+          # .pyc files into the HACS release.
           mkdir -p dist
-          (cd custom_components/llama_cpp_ai_task && zip -qr "${GITHUB_WORKSPACE}/dist/llama_cpp_ai_task.zip" .)
+          git archive \
+            --format=zip \
+            --output="${GITHUB_WORKSPACE}/dist/llama_cpp_ai_task.zip" \
+            HEAD:custom_components/llama_cpp_ai_task
+          if unzip -Z1 dist/llama_cpp_ai_task.zip | grep -Eq '(^|/)__pycache__/|\.py[co]$'; then
+            echo "Release archive contains Python bytecode" >&2
+            exit 1
+          fi
           (cd dist && sha256sum llama_cpp_ai_task.zip > llama_cpp_ai_task.zip.sha256)
 
       - name: Publish GitHub Release
@@ -188,9 +197,6 @@ jobs:
           TAG: ${{ steps.version.outputs.tag }}
         run: |
           python scripts/release.py check-tag "${TAG}"
-          # The releases collection can briefly lag immediately after creation.
-          # Verify the exact release we just published, retrying only for API
-          # propagation. Normal CI still compares against the newest release.
           for attempt in 1 2 3 4 5; do
             if python scripts/check_release_consistency.py --expected-tag "${TAG}"; then
               exit 0
