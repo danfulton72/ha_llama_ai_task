@@ -91,6 +91,8 @@ class LlamaCppBaseLLMEntity(Entity):
         payload: dict[str, Any] = {
             "messages": messages,
             "stream": False,
+            # Reuse the KV cache between calls; this is a significant win for
+            # repeated AI Tasks that share the same system prompt.
             "cache_prompt": True,
             "max_tokens": int(options.get(CONF_MAX_TOKENS, DEFAULT_MAX_TOKENS)),
             "temperature": float(options.get(CONF_TEMPERATURE, DEFAULT_TEMPERATURE)),
@@ -105,9 +107,17 @@ class LlamaCppBaseLLMEntity(Entity):
             payload["model"] = model
 
         if not options.get(CONF_THINKING, DEFAULT_THINKING):
+            # Honoured by hybrid-reasoning templates (Qwen3, GLM, ...) and
+            # ignored by templates that do not use the variable. Constrained
+            # decoding and long thinking blocks do not mix well, so thinking is
+            # off unless the user explicitly asks for it.
             payload["chat_template_kwargs"] = {"enable_thinking": False}
 
         if json_schema is not None:
+            # Current llama.cpp reads the OpenAI-compatible nested schema shape.
+            # Do not send OpenAI's `strict` flag: schemas converted from Home
+            # Assistant do not necessarily meet strict-mode requirements such as
+            # every property being required and additionalProperties=false.
             payload["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {
@@ -118,7 +128,9 @@ class LlamaCppBaseLLMEntity(Entity):
 
         LOGGER.debug(
             "Sending chat completion to llama.cpp (model=%s, structured=%s, messages=%d)",
-            payload.get("model") or self.client.default_model or self.server_info.model_name,
+            payload.get("model")
+            or self.client.default_model
+            or self.server_info.model_name,
             json_schema is not None,
             len(messages),
         )
@@ -135,7 +147,11 @@ class LlamaCppBaseLLMEntity(Entity):
     async def _async_build_messages(
         self, chat_log: conversation.ChatLog
     ) -> list[dict[str, Any]]:
-        """Convert the chat log into llama.cpp chat messages."""
+        """Convert the chat log into llama.cpp chat messages.
+
+        All system content is merged into a single leading message because some
+        chat templates reject more than one system turn.
+        """
         system_parts: list[str] = []
         messages: list[dict[str, Any]] = []
 
@@ -154,6 +170,8 @@ class LlamaCppBaseLLMEntity(Entity):
                         {"role": "assistant", "content": content.content}
                     )
             else:
+                # Tool calls are not exposed by this integration, so unsupported
+                # tool content is deliberately not forwarded to llama.cpp.
                 LOGGER.debug("Skipping unsupported chat content %s", type(content))
 
         if system_parts:
