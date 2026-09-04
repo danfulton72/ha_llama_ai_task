@@ -1,4 +1,4 @@
-"""Config flow for the llama.cpp integration."""
+"""Config flow for the llama.cpp AI Task integration."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from homeassistant.config_entries import (
     ConfigSubentryFlow,
     SubentryFlowResult,
 )
-from homeassistant.const import CONF_URL
+from homeassistant.const import CONF_API_KEY, CONF_URL
 from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
@@ -33,6 +33,7 @@ from homeassistant.helpers.selector import (
 )
 
 from .client import (
+    LlamaCppAuthError,
     LlamaCppClient,
     LlamaCppConnectionError,
     LlamaCppError,
@@ -51,6 +52,7 @@ from .const import (
     CONF_TIMEOUT,
     CONF_TOP_K,
     CONF_TOP_P,
+    DEFAULT_AI_TASK_NAME,
     DEFAULT_MAX_TOKENS,
     DEFAULT_REPEAT_PENALTY,
     DEFAULT_TEMPERATURE,
@@ -68,15 +70,18 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_URL, default=DEFAULT_URL): TextSelector(
             TextSelectorConfig(type=TextSelectorType.URL)
-        )
+        ),
+        vol.Optional(CONF_API_KEY): TextSelector(
+            TextSelectorConfig(type=TextSelectorType.PASSWORD)
+        ),
     }
 )
 
 
 class LlamaCppConfigFlow(ConfigFlow, domain=DOMAIN):
-    """Handle the config flow for llama.cpp."""
+    """Handle the config flow for llama.cpp AI Task."""
 
-    VERSION = 1
+    VERSION = 2
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -86,25 +91,27 @@ class LlamaCppConfigFlow(ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             url = normalize_base_url(user_input[CONF_URL])
-            self._async_abort_entries_match({CONF_URL: url})
+            if self._url_is_configured(url):
+                return self.async_abort(reason="already_configured")
 
-            info, model, error = await self._async_try_connect(url)
+            api_key = user_input.get(CONF_API_KEY) or None
+            info, model, error = await self._async_try_connect(url, api_key)
             if error:
                 errors["base"] = error
             else:
                 assert info is not None
                 title_model = model or info.model_name or "llama.cpp"
                 subentry_data = {CONF_MODEL: model} if model else {}
+                data: dict[str, Any] = {CONF_URL: url}
+                if api_key:
+                    data[CONF_API_KEY] = api_key
                 return self.async_create_entry(
-                    title=info.model_name or "llama.cpp",
-                    data={CONF_URL: url},
+                    title=info.model_name or model or "llama.cpp",
+                    data=data,
                     subentries=[
                         ConfigSubentryData(
                             subentry_type=AI_TASK_SUBENTRY_TYPE,
                             title=model_name_to_title(title_model),
-                            # Attachment support is derived from the modalities
-                            # the server reports on every setup, so nothing is
-                            # frozen into the subentry here.
                             data=subentry_data,
                             unique_id=None,
                         )
@@ -122,42 +129,97 @@ class LlamaCppConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Change the URL of an existing entry."""
+        """Change the URL or optional API key of an existing entry."""
         entry = self._get_reconfigure_entry()
         errors: dict[str, str] = {}
 
         if user_input is not None:
             url = normalize_base_url(user_input[CONF_URL])
-            for other in self._async_current_entries():
-                if other.entry_id != entry.entry_id and other.data.get(CONF_URL) == url:
-                    return self.async_abort(reason="already_configured")
+            if self._url_is_configured(url, exclude_entry_id=entry.entry_id):
+                return self.async_abort(reason="already_configured")
 
-            _, _, error = await self._async_try_connect(url)
+            api_key = user_input.get(CONF_API_KEY) or None
+            _, _, error = await self._async_try_connect(url, api_key)
             if error:
                 errors["base"] = error
             else:
-                return self.async_update_reload_and_abort(
-                    entry,
-                    data_updates={CONF_URL: url},
-                )
+                data: dict[str, Any] = {CONF_URL: url}
+                if api_key:
+                    data[CONF_API_KEY] = api_key
+                return self.async_update_reload_and_abort(entry, data=data)
 
+        defaults: dict[str, Any] = {
+            CONF_URL: entry.data[CONF_URL],
+            CONF_API_KEY: entry.data.get(CONF_API_KEY, ""),
+        }
         return self.async_show_form(
             step_id="reconfigure",
             data_schema=self.add_suggested_values_to_schema(
-                STEP_USER_DATA_SCHEMA,
-                user_input or {CONF_URL: entry.data[CONF_URL]},
+                STEP_USER_DATA_SCHEMA, user_input or defaults
             ),
             errors=errors,
         )
 
+    async def async_step_reauth(
+        self, entry_data: dict[str, Any]
+    ) -> ConfigFlowResult:
+        """Handle an authentication failure."""
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Ask for an optional replacement API key."""
+        entry = self._get_reauth_entry()
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            api_key = user_input.get(CONF_API_KEY) or None
+            _, _, error = await self._async_try_connect(entry.data[CONF_URL], api_key)
+            if error:
+                errors["base"] = error
+            else:
+                data = dict(entry.data)
+                if api_key:
+                    data[CONF_API_KEY] = api_key
+                else:
+                    data.pop(CONF_API_KEY, None)
+                return self.async_update_reload_and_abort(entry, data=data)
+
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(CONF_API_KEY): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.PASSWORD)
+                    )
+                }
+            ),
+            errors=errors,
+            description_placeholders={CONF_URL: entry.data[CONF_URL]},
+        )
+
+    def _url_is_configured(
+        self, url: str, *, exclude_entry_id: str | None = None
+    ) -> bool:
+        """Return whether a normalized server URL is already configured."""
+        return any(
+            entry.entry_id != exclude_entry_id
+            and isinstance((stored := entry.data.get(CONF_URL)), str)
+            and normalize_base_url(stored) == url
+            for entry in self._async_current_entries()
+        )
+
     async def _async_try_connect(
-        self, url: str
+        self, url: str, api_key: str | None
     ) -> tuple[LlamaCppServerInfo | None, str | None, str | None]:
         """Try to reach the server and identify a request-safe model ID."""
-        client = LlamaCppClient(async_get_clientsession(self.hass), url)
+        client = LlamaCppClient(async_get_clientsession(self.hass), url, api_key)
         try:
             info = await client.async_detect_server_info()
             models = await client.async_list_models()
+        except LlamaCppAuthError:
+            return None, None, "invalid_auth"
         except LlamaCppConnectionError:
             return None, None, "cannot_connect"
         except LlamaCppError as err:
@@ -167,11 +229,9 @@ class LlamaCppConfigFlow(ConfigFlow, domain=DOMAIN):
             LOGGER.exception("Unexpected error connecting to %s", url)
             return None, None, "unknown"
 
-        # Only persist a model proven by /v1/models (or llama-swap routing).
-        # /props model_alias/model_path is useful for naming but is not guaranteed
-        # to be a valid OpenAI request model ID.
-        model = client.default_model or (models[0] if models else None)
-        return info, model, None
+        # async_list_models updates default_model only for a loaded model or a
+        # single-model endpoint. Never persist an arbitrary models[0].
+        return info, client.default_model, None
 
     @classmethod
     @callback
@@ -204,29 +264,42 @@ class LlamaCppSubentryFlowHandler(ConfigSubentryFlow):
         entry = self._get_entry()
         is_new = self.source != SOURCE_RECONFIGURE
 
-        # The entry may not be loaded (server offline), so fall back to blanks.
         runtime = getattr(entry, "runtime_data", None)
         info = runtime.info if runtime else LlamaCppServerInfo()
         models = await runtime.client.async_list_models() if runtime else []
         request_model = runtime.client.default_model if runtime else None
-        if not request_model and models:
-            request_model = models[0]
         title_model = request_model or info.model_name or "llama.cpp"
 
         if user_input is not None:
-            model = user_input.get(CONF_MODEL) or title_model
-            title = model_name_to_title(str(model))
+            selected_model = user_input.get(CONF_MODEL) or request_model
+            new_auto_title = model_name_to_title(
+                str(selected_model or info.model_name or "llama.cpp")
+            )
             if is_new:
-                return self.async_create_entry(title=title, data=user_input)
+                return self.async_create_entry(title=new_auto_title, data=user_input)
+
+            subentry = self._get_reconfigure_subentry()
+            old_model = subentry.data.get(CONF_MODEL)
+            known_auto_titles = {DEFAULT_AI_TASK_NAME}
+            if old_model:
+                known_auto_titles.add(model_name_to_title(str(old_model)))
+
+            # Model names are defaults, not ownership of the user's title. Update
+            # the title only while it still looks autogenerated; otherwise keep a
+            # user-customized title intact when the model changes.
+            title = (
+                new_auto_title
+                if subentry.title in known_auto_titles
+                else subentry.title
+            )
             return self.async_update_and_abort(
                 entry,
-                self._get_reconfigure_subentry(),
+                subentry,
                 data=user_input,
                 title=title,
             )
 
         if is_new:
-            # CONF_ATTACHMENTS is a force-on override, not the detected value.
             defaults: dict[str, Any] = {}
             if request_model:
                 defaults[CONF_MODEL] = request_model
@@ -242,7 +315,7 @@ class LlamaCppSubentryFlowHandler(ConfigSubentryFlow):
                 _options_schema(models), defaults
             ),
             description_placeholders={
-                "model": info.model_name or "unknown",
+                "model": info.model_name or request_model or "unknown",
                 "n_ctx": str(info.n_ctx or "unknown"),
             },
         )
@@ -282,7 +355,8 @@ def _options_schema(models: list[str]) -> vol.Schema:
             ): NumberSelector(NumberSelectorConfig(min=1, max=2, step=0.01)),
             vol.Required(CONF_TIMEOUT, default=DEFAULT_TIMEOUT): NumberSelector(
                 NumberSelectorConfig(
-                    min=10, max=900, step=5, mode=NumberSelectorMode.BOX)
+                    min=10, max=900, step=5, mode=NumberSelectorMode.BOX
+                )
             ),
             vol.Required(CONF_THINKING, default=DEFAULT_THINKING): BooleanSelector(),
             vol.Required(CONF_ATTACHMENTS, default=False): BooleanSelector(),
