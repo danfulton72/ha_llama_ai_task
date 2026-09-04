@@ -27,6 +27,8 @@ concurrency:
 jobs:
   release:
     name: Publish GitHub Release
+    # Automatic releases run only after a successful push-triggered CI on main.
+    # Scheduled/manual/release-event CI runs must never create a release.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.event == 'push' &&
@@ -56,6 +58,11 @@ jobs:
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
             VERSION="$(python scripts/release.py normalize "${REQUESTED_VERSION}")"
           else
+            # GitHub Release is the version authority. In the normal case the
+            # manifest is first verified against the published release below,
+            # then its patch component is incremented. If a previous run pushed
+            # the version commit/tag but failed before publishing the release,
+            # reuse that manifest version so the workflow can recover.
             CURRENT="$(python scripts/release.py get)"
             CURRENT_TAG="v${CURRENT}"
             if ! gh release view "${CURRENT_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1 \
@@ -156,9 +163,10 @@ jobs:
       - name: Build release archive
         shell: bash
         run: |
-          # Archive the tracked integration tree directly. Unlike zipping the
-          # compiled worktree, git archive cannot sweep generated __pycache__ or
-          # .pyc files into the HACS release.
+          # hacs.json sets zip_release with this exact filename, so the asset name
+          # is constant and the integration files must remain at the archive root.
+          # Archive the tracked tree directly: unlike zipping the compiled
+          # worktree, git archive cannot sweep generated __pycache__/.pyc files in.
           mkdir -p dist
           git archive \
             --format=zip \
@@ -197,6 +205,9 @@ jobs:
           TAG: ${{ steps.version.outputs.tag }}
         run: |
           python scripts/release.py check-tag "${TAG}"
+          # The releases collection can briefly lag immediately after creation.
+          # Verify the exact release we just published, retrying only for API
+          # propagation. Normal CI still compares against the newest release.
           for attempt in 1 2 3 4 5; do
             if python scripts/check_release_consistency.py --expected-tag "${TAG}"; then
               exit 0
