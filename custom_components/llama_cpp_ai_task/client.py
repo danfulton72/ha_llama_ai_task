@@ -43,6 +43,20 @@ class LlamaCppAuthError(LlamaCppError):
 class LlamaCppResponseError(LlamaCppError):
     """Raised when the server returns an error payload."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int | None = None,
+        body: str | None = None,
+        url: str | None = None,
+    ) -> None:
+        """Initialize an HTTP response error with diagnostic response details."""
+        super().__init__(message)
+        self.status = status
+        self.body = body
+        self.url = url
+
 
 @dataclass(slots=True)
 class LlamaCppServerInfo:
@@ -56,7 +70,12 @@ class LlamaCppServerInfo:
 
     @property
     def model_name(self) -> str | None:
-        """Return a human readable name for the loaded model."""
+        """Return a human readable name for the loaded model.
+
+        Depending on how the server was started this is a Hugging Face repo id
+        (``unsloth/Qwen3-8B-GGUF``) or a filesystem path. Paths are reduced to
+        the file name; repo ids are left alone.
+        """
         for key in ("model_alias", "model_name", "model_path", "model"):
             value = self.props.get(key)
             if not isinstance(value, str) or not value:
@@ -98,7 +117,12 @@ class LlamaCppServerInfo:
 
 
 def normalize_base_url(base_url: str) -> str:
-    """Normalize a llama.cpp URL to the server root."""
+    """Normalize a llama.cpp URL to the server root.
+
+    Users commonly paste the OpenAI-compatible ``.../v1`` base URL. llama.cpp
+    exposes introspection endpoints such as ``/props`` one level above it, so
+    accept either spelling and store/use the root consistently.
+    """
     normalized = base_url.rstrip("/")
     if normalized.lower().endswith("/v1"):
         normalized = normalized[:-3].rstrip("/")
@@ -163,13 +187,19 @@ class LlamaCppClient:
                     )
                 if response.status >= 400:
                     raise LlamaCppResponseError(
-                        _error_message(body, response.status, str(response.url))
+                        _error_message(body, response.status, str(response.url)),
+                        status=response.status,
+                        body=body,
+                        url=str(response.url),
                     )
                 try:
                     return await response.json(content_type=None)
                 except ValueError as err:
                     raise LlamaCppResponseError(
-                        f"{response.url} returned a non-JSON response: {body[:200]}"
+                        f"{response.url} returned a non-JSON response: {body[:200]}",
+                        status=response.status,
+                        body=body,
+                        url=str(response.url),
                     ) from err
         except TimeoutError as err:
             raise LlamaCppConnectionError(
@@ -209,29 +239,41 @@ class LlamaCppClient:
         return [model for model in data if isinstance(model, dict)]
 
     async def async_list_models(self) -> list[str]:
-        """Return model IDs the endpoint reports as servable.
+        """Return model IDs the endpoint reports as servable without mutating state.
 
-        A default is chosen only when the server gives us a meaningful signal:
-        an already-loaded model or exactly one available model. Multi-model lists
-        with no loaded/default signal are deliberately left unselected.
+        Failure is not fatal because the model field can be entered manually. Use
+        ``async_refresh_models`` when the caller also wants the client to refresh
+        its automatic request default from a loaded/sole-model signal.
         """
         try:
             records = await self._async_list_model_records()
         except LlamaCppError as err:
             LOGGER.debug("Could not list models: %s", err)
             return []
+        return _model_ids(records)
 
-        model_ids = _model_ids(records)
-        if self._default_model is None:
-            self._default_model = _preferred_model_id(records)
-        return model_ids
+    async def async_refresh_models(self) -> list[str]:
+        """Refresh model IDs and the automatic request default explicitly."""
+        try:
+            records = await self._async_list_model_records()
+        except LlamaCppError as err:
+            LOGGER.debug("Could not refresh models: %s", err)
+            return []
+        self._default_model = _preferred_model_id(records)
+        return _model_ids(records)
 
     async def async_detect_server_info(self) -> LlamaCppServerInfo:
-        """Discover a direct llama-server or model-routed endpoint.
+        """Discover a direct llama-server or model-routed llama.cpp endpoint.
 
-        Routed discovery never intentionally probes an unloaded model. This avoids
-        repeated cold starts during Home Assistant setup. ``autoload=false`` is
+        A generic OpenAI-compatible ``/v1/models`` response is not sufficient to
+        identify llama.cpp. Routed mode is accepted only when a model-specific
+        ``/props`` probe succeeds or the ``/props`` error itself carries a known
+        llama.cpp/router routing signal.
+
+        Discovery never walks a list of unloaded models. ``autoload=false`` is
         included for routers that honour it; llama-swap ignores that parameter.
+        A sole model is the one safe exception: it is probed once so capabilities
+        can be discovered without risking a sequence of cold starts.
         """
         try:
             info = await self.async_get_server_info()
@@ -271,14 +313,46 @@ class LlamaCppClient:
                 LOGGER.debug("Detected routed llama.cpp model %s", model_id)
                 return info
 
-            # A valid model catalogue is enough to identify a routed endpoint even
-            # when none of its models are currently loaded. Do not cold-start one
-            # merely for capability discovery. A sole model is safe as the request
-            # default; a multi-model endpoint remains unselected until the user or
-            # server provides a loaded/default signal.
+            if len(model_ids) == 1:
+                model_id = model_ids[0]
+                try:
+                    info = await self.async_get_server_info(
+                        model_id,
+                        autoload=False,
+                        timeout=ROUTED_PROPS_TIMEOUT,
+                    )
+                except LlamaCppAuthError:
+                    raise
+                except LlamaCppResponseError as routed_error:
+                    if not (
+                        _looks_like_routed_props_error(direct_error)
+                        or _looks_like_routed_props_error(routed_error)
+                    ):
+                        raise direct_error from None
+                    LOGGER.debug(
+                        "Recognized routed llama.cpp endpoint with sole model %s; "
+                        "model capabilities are not currently available",
+                        model_id,
+                    )
+                except LlamaCppError:
+                    raise direct_error from None
+                else:
+                    self._default_model = model_id
+                    LOGGER.debug("Detected routed llama.cpp model %s", model_id)
+                    return info
+
+                self._default_model = model_id
+                return LlamaCppServerInfo()
+
+            if not _looks_like_routed_props_error(direct_error):
+                raise direct_error from None
+
+            # The direct /props response itself identified a model router, but no
+            # loaded model could be introspected safely. Keep capabilities unknown
+            # rather than cold-starting multiple models during Home Assistant setup.
             self._default_model = _preferred_model_id(records)
             LOGGER.debug(
-                "Detected model-routed endpoint without probing unloaded models "
+                "Detected llama.cpp model router without probing unloaded models "
                 "(models=%d, default=%s)",
                 len(model_ids),
                 self._default_model,
@@ -292,6 +366,8 @@ class LlamaCppClient:
         self, payload: dict[str, Any], *, timeout: float = DEFAULT_TIMEOUT
     ) -> dict[str, Any]:
         """Call ``/v1/chat/completions`` and return the raw response."""
+        # Do not mutate the entity's payload when supplying an automatic router
+        # model; callers may reuse/debug that payload after this method returns.
         request_payload = payload
         if self._default_model and not payload.get("model"):
             request_payload = {**payload, "model": self._default_model}
@@ -328,9 +404,23 @@ def _preferred_model_id(records: list[dict[str, Any]]) -> str | None:
 
 
 def _model_is_loaded(model: dict[str, Any]) -> bool:
-    """Return whether a router reports a model as already loaded."""
+    """Return whether a known router schema reports a model as already loaded."""
     status = model.get("status")
     return isinstance(status, dict) and status.get("value") == "loaded"
+
+
+def _looks_like_routed_props_error(error: LlamaCppResponseError) -> bool:
+    """Return whether a /props failure carries a model-router routing signal."""
+    text = f"{error.body or ''}\n{error}".lower()
+    return (
+        "llama-swap" in text
+        or "no model id could be identified" in text
+        or "model is required" in text
+        or "model id is required" in text
+        or "model_id is required" in text
+        or "model is not loaded" in text
+        or "model not loaded" in text
+    )
 
 
 def _error_message(body: str, status: int, url: str) -> str:
