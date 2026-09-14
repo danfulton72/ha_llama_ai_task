@@ -1,0 +1,66 @@
+name: Dependabot minor and patch auto-merge
+
+on:
+  schedule:
+    - cron: "23 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+  statuses: read
+
+concurrency:
+  group: dependabot-automerge-release
+  cancel-in-progress: false
+
+jobs:
+  merge-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge one green Dependabot update and publish a patch release
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const defaultBranch = context.payload.repository.default_branch;
+            const acceptable = new Set(["success", "neutral", "skipped"]);
+            const prs = await github.paginate(github.rest.pulls.list, { owner, repo, state: "open", per_page: 100 });
+            for (const pr of prs) {
+              if (pr.user?.login !== "dependabot[bot]" || pr.draft) continue;
+              const { data: candidate } = await github.rest.pulls.get({ owner, repo, pull_number: pr.number });
+              if (!/update-type:\s+version-update:semver-(minor|patch)/i.test(candidate.body || "")) continue;
+              if (candidate.mergeable !== true || ["dirty", "blocked", "behind", "draft"].includes(candidate.mergeable_state)) continue;
+              const { data: checkData } = await github.rest.checks.listForRef({ owner, repo, ref: candidate.head.sha, per_page: 100 });
+              const checks = checkData.check_runs;
+              if (checks.length === 0 || checks.some((check) => check.status !== "completed" || !acceptable.has(check.conclusion))) continue;
+              const { data: statusData } = await github.rest.repos.getCombinedStatusForRef({ owner, repo, ref: candidate.head.sha });
+              if (statusData.total_count > 0 && statusData.state !== "success") continue;
+              const { data: merged } = await github.rest.pulls.merge({ owner, repo, pull_number: candidate.number, merge_method: "squash", sha: candidate.head.sha, commit_title: `chore(deps): merge Dependabot #${candidate.number}` });
+              if (!merged.merged) continue;
+              const { data: components } = await github.rest.repos.getContent({ owner, repo, path: "custom_components", ref: defaultBranch });
+              const componentDirs = components.filter((item) => item.type === "dir");
+              if (componentDirs.length !== 1) throw new Error(`Expected one custom component, found ${componentDirs.length}`);
+              const manifestPath = `${componentDirs[0].path}/manifest.json`;
+              const { data: manifestFile } = await github.rest.repos.getContent({ owner, repo, path: manifestPath, ref: defaultBranch });
+              if (Array.isArray(manifestFile) || !manifestFile.content) throw new Error(`Could not read ${manifestPath}`);
+              const manifest = JSON.parse(Buffer.from(manifestFile.content, "base64").toString("utf8"));
+              const parseVersion = (value) => { const match = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(String(value)); return match ? match.slice(1).map(Number) : null; };
+              const versions = [parseVersion(manifest.version)].filter(Boolean);
+              const tags = await github.paginate(github.rest.repos.listTags, { owner, repo, per_page: 100 });
+              for (const tag of tags) { const version = parseVersion(tag.name); if (version) versions.push(version); }
+              if (versions.length === 0) throw new Error("No semantic version found");
+              versions.sort((a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2]);
+              const [major, minor, patch] = versions.at(-1);
+              const newVersion = `${major}.${minor}.${patch + 1}`;
+              manifest.version = newVersion;
+              const { data: updated } = await github.rest.repos.createOrUpdateFileContents({ owner, repo, path: manifestPath, branch: defaultBranch, sha: manifestFile.sha, message: `chore: release v${newVersion} [skip ci]`, content: Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`).toString("base64"), committer: { name: "github-actions[bot]", email: "41898282+github-actions[bot]@users.noreply.github.com" } });
+              const releaseSha = updated.commit.sha;
+              const tagName = `v${newVersion}`;
+              await github.rest.git.createRef({ owner, repo, ref: `refs/tags/${tagName}`, sha: releaseSha });
+              await github.rest.repos.createRelease({ owner, repo, tag_name: tagName, target_commitish: releaseSha, name: tagName, generate_release_notes: true });
+              core.notice(`Merged Dependabot #${candidate.number} and published ${tagName}.`);
+              return;
+            }
+            core.notice("No green minor or patch Dependabot pull request is ready to merge.");
